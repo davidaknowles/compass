@@ -1,7 +1,6 @@
 """COMPASS prototype implementation."""
 
 from .data import load_top_assoc_annotations, load_gwas_sumstats, make_training_table
-from .ld import build_positional_ld
 from .model import (
     CompassDataset,
     FitResult,
@@ -14,7 +13,6 @@ from .model import (
 __all__ = [
     "CompassDataset",
     "FitResult",
-    "build_positional_ld",
     "fit_nuclear_norm_path",
     "fit_rank1_path",
     "load_gwas_sumstats",

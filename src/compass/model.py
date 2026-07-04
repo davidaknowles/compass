@@ -16,7 +16,7 @@ class CompassDataset:
     R2: sp.csr_matrix
     chisq: np.ndarray
     chrom: np.ndarray
-    n_samples: float
+    n_samples: float | np.ndarray
     sample_weight: np.ndarray | None = None
 
     @property
@@ -51,13 +51,17 @@ def _flatten_B(B: torch.Tensor) -> torch.Tensor:
     return B.reshape(-1)
 
 
+def _samples_tensor(n_samples: float | np.ndarray, device: str) -> torch.Tensor:
+    return torch.as_tensor(n_samples, dtype=torch.float32, device=device)
+
+
 def predict_factorized(
     B: torch.Tensor,
     tau_raw: torch.Tensor,
     A_t: torch.Tensor,
     R2_t: torch.Tensor,
     ld_score: torch.Tensor,
-    n_samples: float,
+    n_samples: float | torch.Tensor,
 ) -> torch.Tensor:
     mediated = torch.sparse.mm(A_t, _flatten_B(B).unsqueeze(1)).squeeze(1)
     smoothed = torch.sparse.mm(R2_t, mediated.unsqueeze(1)).squeeze(1)
@@ -70,16 +74,56 @@ def predict_precomputed(
     tau_raw: torch.Tensor,
     T_t: torch.Tensor,
     ld_score: torch.Tensor,
-    n_samples: float,
+    n_samples: float | torch.Tensor,
 ) -> torch.Tensor:
     smoothed = torch.sparse.mm(T_t, _flatten_B(B).unsqueeze(1)).squeeze(1)
     tau = torch.nn.functional.softplus(tau_raw)
     return 1.0 + n_samples * (smoothed + tau * ld_score)
 
 
-def nuclear_prox_nonnegative(B: torch.Tensor, threshold: float) -> torch.Tensor:
+def _randomized_svd(
+    B: torch.Tensor,
+    rank: int,
+    n_oversamples: int = 5,
+    n_iter: int = 2,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    rank = max(1, min(rank, min(B.shape)))
+    q = min(min(B.shape), rank + max(0, n_oversamples))
+    omega = torch.randn((B.shape[1], q), dtype=B.dtype, device=B.device)
+    y = B @ omega
+    for _ in range(n_iter):
+        y = B @ (B.T @ y)
+    q_mat, _ = torch.linalg.qr(y, mode="reduced")
+    small = q_mat.T @ B
+    u_small, s, vh = torch.linalg.svd(small, full_matrices=False)
+    u = q_mat @ u_small
+    return u[:, :rank], s[:rank], vh[:rank]
+
+
+def nuclear_prox_nonnegative(
+    B: torch.Tensor,
+    threshold: float,
+    svd_method: str = "auto",
+    svd_rank: int | None = None,
+    svd_oversamples: int = 5,
+    svd_n_iter: int = 2,
+) -> torch.Tensor:
     with torch.no_grad():
-        U, S, Vh = torch.linalg.svd(B, full_matrices=False)
+        min_dim = min(B.shape)
+        use_randomized = svd_method == "randomized" or (
+            svd_method == "auto" and min_dim > 64 and svd_rank is not None and svd_rank < min_dim
+        )
+        if svd_method not in {"auto", "exact", "randomized"}:
+            raise ValueError(f"Unknown svd_method: {svd_method}")
+        if use_randomized:
+            U, S, Vh = _randomized_svd(
+                B,
+                rank=min_dim if svd_rank is None else svd_rank,
+                n_oversamples=svd_oversamples,
+                n_iter=svd_n_iter,
+            )
+        else:
+            U, S, Vh = torch.linalg.svd(B, full_matrices=False)
         S = torch.clamp(S - threshold, min=0.0)
         out = (U * S.unsqueeze(0)) @ Vh
         return torch.clamp(out, min=0.0)
@@ -97,6 +141,10 @@ def fit_nuclear_norm(
     tol: float = 1e-6,
     use_precomputed: bool = True,
     device: str = "cpu",
+    svd_method: str = "auto",
+    svd_rank: int | None = None,
+    svd_oversamples: int = 5,
+    svd_n_iter: int = 2,
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit the convex non-negative nuclear-norm COMPASS relaxation."""
 
@@ -109,6 +157,7 @@ def fit_nuclear_norm(
     chisq = torch.as_tensor(dataset.chisq, dtype=torch.float32, device=device)
     weight = _weights(chisq, dataset.sample_weight, device)
     ld_score = torch.as_tensor(np.asarray(R2.sum(axis=1)).ravel(), dtype=torch.float32, device=device)
+    n_samples = _samples_tensor(dataset.n_samples, device)
 
     if init_B is None:
         B = torch.zeros((n_genes, n_mechanisms), dtype=torch.float32, device=device, requires_grad=True)
@@ -124,15 +173,22 @@ def fit_nuclear_norm(
         if tau_raw.grad is not None:
             tau_raw.grad.zero_()
         if use_precomputed:
-            pred = predict_precomputed(B, tau_raw, T_t, ld_score, dataset.n_samples)
+            pred = predict_precomputed(B, tau_raw, T_t, ld_score, n_samples)
         else:
-            pred = predict_factorized(B, tau_raw, A_t, R2_t, ld_score, dataset.n_samples)
+            pred = predict_factorized(B, tau_raw, A_t, R2_t, ld_score, n_samples)
         residual = chisq - pred
         loss = torch.mean(weight * residual.square())
         loss.backward()
         with torch.no_grad():
             B_next = B - lr * B.grad
-            B_next = nuclear_prox_nonnegative(B_next, lr * lambda_value)
+            B_next = nuclear_prox_nonnegative(
+                B_next,
+                lr * lambda_value,
+                svd_method=svd_method,
+                svd_rank=svd_rank,
+                svd_oversamples=svd_oversamples,
+                svd_n_iter=svd_n_iter,
+            )
             tau_raw -= lr * tau_raw.grad
             delta = torch.linalg.norm(B_next - B) / (torch.linalg.norm(B) + 1e-8)
             B.copy_(B_next)
@@ -144,6 +200,8 @@ def fit_nuclear_norm(
         "seconds": perf_counter() - start,
         "use_precomputed": use_precomputed,
         "T_nnz": None if T is None else int(T.nnz),
+        "svd_method": svd_method,
+        "svd_rank": svd_rank,
     }
     return (
         B.detach().cpu().numpy(),
@@ -185,6 +243,7 @@ def fit_rank1_alt(
     chisq = torch.as_tensor(dataset.chisq, dtype=torch.float32, device=device)
     weight = _weights(chisq, dataset.sample_weight, device)
     ld_score = torch.as_tensor(np.asarray(R2.sum(axis=1)).ravel(), dtype=torch.float32, device=device)
+    n_samples = _samples_tensor(dataset.n_samples, device)
 
     s_raw0 = np.full(n_genes, -8.0, dtype=np.float32) if init_s is None else np.log(np.expm1(np.maximum(init_s, 1e-12)))
     if init_w is None:
@@ -210,9 +269,9 @@ def fit_rank1_alt(
         w = _normalize_simplex(w_raw, constrain_w_simplex)
         B = torch.outer(s, w)
         if use_precomputed:
-            pred = predict_precomputed(B, tau_raw, T_t, ld_score, dataset.n_samples)
+            pred = predict_precomputed(B, tau_raw, T_t, ld_score, n_samples)
         else:
-            pred = predict_factorized(B, tau_raw, A_t, R2_t, ld_score, dataset.n_samples)
+            pred = predict_factorized(B, tau_raw, A_t, R2_t, ld_score, n_samples)
         residual = chisq - pred
         loss = torch.mean(weight * residual.square()) + lambda_value * torch.linalg.norm(B, ord="nuc")
         loss.backward()
@@ -244,12 +303,15 @@ def fit_rank1_alt(
 
 def _subset_dataset(dataset: CompassDataset, keep: np.ndarray) -> CompassDataset:
     keep = np.asarray(keep, dtype=bool)
+    n_samples = dataset.n_samples
+    if np.ndim(n_samples) > 0:
+        n_samples = np.asarray(n_samples)[keep]
     return CompassDataset(
         A=dataset.A[keep],
         R2=dataset.R2[keep][:, keep],
         chisq=dataset.chisq[keep],
         chrom=dataset.chrom[keep],
-        n_samples=dataset.n_samples,
+        n_samples=n_samples,
         sample_weight=None if dataset.sample_weight is None else dataset.sample_weight[keep],
     )
 
@@ -324,7 +386,7 @@ def leave_one_chrom_cv(
 def _predict_numpy(dataset: CompassDataset, B: np.ndarray, tau: float) -> np.ndarray:
     ld_score = np.asarray(dataset.R2.sum(axis=1)).ravel()
     smoothed = dataset.R2 @ (dataset.A @ B.reshape(-1))
-    return 1.0 + dataset.n_samples * (np.asarray(smoothed).ravel() + tau * ld_score)
+    return 1.0 + np.asarray(dataset.n_samples) * (np.asarray(smoothed).ravel() + tau * ld_score)
 
 
 def fit_nuclear_norm_path(

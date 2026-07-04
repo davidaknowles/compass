@@ -22,16 +22,16 @@ The current code uses `torch`, `numpy`, `pandas`, `scipy`, `matplotlib`, and `se
 Data should live outside the repo under:
 
 ```bash
-~/data/compass/data
+~/knowles_lab/data/compass
 ```
 
 Current downloaded files:
 
 ```text
-~/data/compass/data/raw/zenodo_top_assoc/*.tsv.gz
-~/data/compass/data/raw/ad_gwas/AD_sumstats_Jansenetal_2019sept.txt.gz
-~/data/compass/data/raw/required_ukbb_ld_blocks.tsv
-~/data/compass/data/raw/ukbb_ld/
+~/knowles_lab/data/compass/raw/zenodo_top_assoc/*.tsv.gz
+~/knowles_lab/data/compass/raw/ad_gwas/AD_sumstats_Jansenetal_2019sept.txt.gz
+~/knowles_lab/data/compass/raw/ukbb_ld/
+~/knowles_lab/data/compass/results/
 ```
 
 The AD GWAS file is the updated Jansen et al. 2019 Alzheimer summary statistics
@@ -48,36 +48,38 @@ The downloader uses these public sources:
 
 ## Download Commands
 
-Download or refresh the AD GWAS:
-
-```bash
-python scripts/download_required_data.py --download-ad
-```
-
-Build the UKBB LD block manifest from the Zenodo top-association files:
-
-```bash
-python scripts/download_required_data.py
-```
-
-Download UKBB LD metadata sidecars:
-
-```bash
-python scripts/download_required_data.py --download-ld-metadata
-```
-
-Download a targeted UKBB LD matrix block, for example the APOE-region blocks:
+Download or refresh all required public inputs, including every autosomal UKBB
+LD `.npz` block and `.gz` metadata sidecar:
 
 ```bash
 python scripts/download_required_data.py \
-  --download-ld-npz --download-ld-metadata \
-  --chrom 19 --start 42000001 --end 48000001
+  --download-top-assoc \
+  --download-ad \
+  --download-ld-metadata \
+  --download-ld-npz
 ```
 
-Do not download all `--download-ld-npz` blocks blindly. The top-association variants
-touch 906 UKBB 3 Mb blocks, and individual `.npz` files can exceed 1 GB.
+Submit the same full download through Slurm:
+
+```bash
+sbatch scripts/slurm/download_all_data.sbatch
+```
 
 ## Usage
+
+Run the default genome-wide workflow:
+
+```bash
+python scripts/run.py
+```
+
+The run requires known sample sizes. The AD GWAS downloaded above contains
+`Nsum`/`Neff`, which are loaded automatically; otherwise pass a scalar sample
+size explicitly:
+
+```bash
+python scripts/run.py --gwas path/to/sumstats.tsv.gz --n-samples 360000
+```
 
 Load top eQTL annotations with an intercept mechanism:
 
@@ -85,16 +87,16 @@ Load top eQTL annotations with an intercept mechanism:
 from compass.data import load_top_assoc_annotations
 
 ann = load_top_assoc_annotations(
-    "~/data/compass/data/raw/zenodo_top_assoc",
+    "~/knowles_lab/data/compass/raw/zenodo_top_assoc",
     annotation_value="z2",
     add_intercept=True,
 )
 ```
 
-Build sparse annotations and a positional LD fallback:
+Build sparse annotations and UKBB LD squared correlations:
 
 ```python
-from compass.ld import annotation_triples_to_csr, build_positional_ld
+from compass.ld import annotation_triples_to_csr, build_ukbb_ld_r2
 
 A = annotation_triples_to_csr(
     ann.triples,
@@ -102,7 +104,10 @@ A = annotation_triples_to_csr(
     n_genes=len(ann.genes),
     n_mechanisms=len(ann.mechanisms),
 )
-R2 = build_positional_ld(ann.variants)
+R2, ld_diagnostics = build_ukbb_ld_r2(
+    ann.variants,
+    "~/knowles_lab/data/compass/raw/ukbb_ld",
+)
 ```
 
 Fit a small nuclear-norm path:
@@ -136,8 +141,3 @@ from compass.benchmark import benchmark_representations
 
 benchmark_representations(A, R2, len(ann.genes), len(ann.mechanisms))
 ```
-
-## Notes
-
-`build_positional_ld` is only a development fallback. For inference, replace it with
-reference-panel squared correlations loaded from the UKBB LD `.npz` blocks.

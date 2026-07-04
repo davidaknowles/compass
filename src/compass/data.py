@@ -164,7 +164,7 @@ def load_gwas_sumstats(path: str | Path) -> pd.DataFrame:
     beta_col = pick("beta", "effect", "b")
     se_col = pick("se", "stderr", "standard_error")
     p_col = pick("p", "pvalue", "p.value", "pval")
-    n_col = pick("n", "samplesize", "n_complete_samples")
+    n_col = pick("n", "nsum", "neff", "samplesize", "n_complete_samples")
 
     out = pd.DataFrame(index=df.index)
     if chrom_col is not None and pos_col is not None:
