@@ -100,6 +100,19 @@ def _randomized_svd(
     return u[:, :rank], s[:rank], vh[:rank]
 
 
+def _svt_from_gram(B: torch.Tensor, threshold: float) -> torch.Tensor:
+    gram = B.T @ B
+    gram = 0.5 * (gram + gram.T)
+    eigenvalues, eigenvectors = torch.linalg.eigh(gram)
+    order = torch.argsort(eigenvalues, descending=True)
+    eigenvalues = torch.clamp(eigenvalues[order], min=0.0)
+    eigenvectors = eigenvectors[:, order]
+    singular_values = torch.sqrt(eigenvalues)
+    shrink = torch.clamp(singular_values - threshold, min=0.0)
+    scale = torch.where(singular_values > 0, shrink / singular_values, torch.zeros_like(shrink))
+    return (B @ eigenvectors * scale.unsqueeze(0)) @ eigenvectors.T
+
+
 def nuclear_prox_nonnegative(
     B: torch.Tensor,
     threshold: float,
@@ -109,13 +122,17 @@ def nuclear_prox_nonnegative(
     svd_n_iter: int = 2,
 ) -> torch.Tensor:
     with torch.no_grad():
+        B = torch.nan_to_num(B, nan=0.0, posinf=0.0, neginf=0.0)
         min_dim = min(B.shape)
         use_randomized = svd_method == "randomized" or (
             svd_method == "auto" and min_dim > 64 and svd_rank is not None and svd_rank < min_dim
         )
         if svd_method not in {"auto", "exact", "randomized"}:
             raise ValueError(f"Unknown svd_method: {svd_method}")
-        if use_randomized:
+        if not use_randomized and B.shape[0] >= B.shape[1]:
+            out = _svt_from_gram(B, threshold)
+            return torch.clamp(torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0), min=0.0)
+        elif use_randomized:
             U, S, Vh = _randomized_svd(
                 B,
                 rank=min_dim if svd_rank is None else svd_rank,
@@ -126,7 +143,7 @@ def nuclear_prox_nonnegative(
             U, S, Vh = torch.linalg.svd(B, full_matrices=False)
         S = torch.clamp(S - threshold, min=0.0)
         out = (U * S.unsqueeze(0)) @ Vh
-        return torch.clamp(out, min=0.0)
+        return torch.clamp(torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0), min=0.0)
 
 
 def fit_nuclear_norm(
@@ -145,6 +162,7 @@ def fit_nuclear_norm(
     svd_rank: int | None = None,
     svd_oversamples: int = 5,
     svd_n_iter: int = 2,
+    grad_clip: float | None = 1.0,
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit the convex non-negative nuclear-norm COMPASS relaxation."""
 
@@ -180,7 +198,13 @@ def fit_nuclear_norm(
         loss = torch.mean(weight * residual.square())
         loss.backward()
         with torch.no_grad():
-            B_next = B - lr * B.grad
+            b_grad = torch.nan_to_num(B.grad, nan=0.0, posinf=0.0, neginf=0.0)
+            if grad_clip is not None:
+                b_grad = torch.clamp(b_grad, min=-grad_clip, max=grad_clip)
+            tau_grad = torch.nan_to_num(tau_raw.grad, nan=0.0, posinf=0.0, neginf=0.0)
+            if grad_clip is not None:
+                tau_grad = torch.clamp(tau_grad, min=-grad_clip, max=grad_clip)
+            B_next = B - lr * b_grad
             B_next = nuclear_prox_nonnegative(
                 B_next,
                 lr * lambda_value,
@@ -189,7 +213,7 @@ def fit_nuclear_norm(
                 svd_oversamples=svd_oversamples,
                 svd_n_iter=svd_n_iter,
             )
-            tau_raw -= lr * tau_raw.grad
+            tau_raw -= lr * tau_grad
             delta = torch.linalg.norm(B_next - B) / (torch.linalg.norm(B) + 1e-8)
             B.copy_(B_next)
         losses.append(float(loss.detach().cpu()))
@@ -202,6 +226,7 @@ def fit_nuclear_norm(
         "T_nnz": None if T is None else int(T.nnz),
         "svd_method": svd_method,
         "svd_rank": svd_rank,
+        "grad_clip": grad_clip,
     }
     return (
         B.detach().cpu().numpy(),
