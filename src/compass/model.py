@@ -185,6 +185,9 @@ def fit_nuclear_norm(
 
     losses: list[float] = []
     start = perf_counter()
+    best_loss = np.inf
+    best_B = B.detach().clone()
+    best_tau_raw = tau_raw.detach().clone()
     for it in range(max_iter):
         if B.grad is not None:
             B.grad.zero_()
@@ -196,6 +199,11 @@ def fit_nuclear_norm(
             pred = predict_factorized(B, tau_raw, A_t, R2_t, ld_score, n_samples)
         residual = chisq - pred
         loss = torch.mean(weight * residual.square())
+        loss_value = float(loss.detach().cpu())
+        if np.isfinite(loss_value) and loss_value < best_loss:
+            best_loss = loss_value
+            best_B = B.detach().clone()
+            best_tau_raw = tau_raw.detach().clone()
         loss.backward()
         with torch.no_grad():
             b_grad = torch.nan_to_num(B.grad, nan=0.0, posinf=0.0, neginf=0.0)
@@ -216,9 +224,12 @@ def fit_nuclear_norm(
             tau_raw -= lr * tau_grad
             delta = torch.linalg.norm(B_next - B) / (torch.linalg.norm(B) + 1e-8)
             B.copy_(B_next)
-        losses.append(float(loss.detach().cpu()))
+        losses.append(loss_value)
         if it > 10 and float(delta.detach().cpu()) < tol:
             break
+    with torch.no_grad():
+        B.copy_(best_B)
+        tau_raw.copy_(best_tau_raw)
     metadata = {
         "iterations": len(losses),
         "seconds": perf_counter() - start,
@@ -227,6 +238,7 @@ def fit_nuclear_norm(
         "svd_method": svd_method,
         "svd_rank": svd_rank,
         "grad_clip": grad_clip,
+        "best_loss": best_loss,
     }
     return (
         B.detach().cpu().numpy(),

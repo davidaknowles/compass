@@ -127,9 +127,10 @@ fit = fit_nuclear_norm_path(
     dataset,
     n_genes=len(ann.genes),
     n_mechanisms=len(ann.mechanisms),
-    lambdas=[1e-2, 1e-3, 1e-4],
+    lambdas=[1e-1, 3e-2, 1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 3e-5, 1e-5],
+    cv=True,
     max_iter=200,
-    lr=1e-2,
+    lr=1e-6,
     device="cpu",
 )
 ```
