@@ -4,8 +4,11 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import re
+from urllib.parse import urlencode
 from urllib.error import HTTPError
-from urllib.request import urlretrieve
+from urllib.request import urlopen, urlretrieve
+import xml.etree.ElementTree as ET
 
 
 AD_GWAS_URL = (
@@ -24,7 +27,9 @@ TOP_ASSOC_FILES = [
     "OPC_top_assoc.tsv.gz",
 ]
 UKBB_LD_PREFIX = "https://broad-alkesgroup-ukbb-ld.s3.amazonaws.com/UKBB_LD"
+UKBB_LD_BUCKET = "https://broad-alkesgroup-ukbb-ld.s3.amazonaws.com"
 REGION_LENGTH = 3_000_000
+LD_STEM_RE = re.compile(r"^chr(?P<chrom>\d+)_(?P<start>\d+)_(?P<end>\d+)$")
 GRCH37_AUTOSOME_LENGTHS = {
     1: 249_250_621,
     2: 243_199_373,
@@ -78,13 +83,48 @@ def download_with_optional_suffix2(url: str, dest: Path, required: bool = True) 
 
 
 def iter_ukbb_ld_blocks(chrom: int | None = None):
-    chroms = [chrom] if chrom is not None else sorted(GRCH37_AUTOSOME_LENGTHS)
-    for chr_num in chroms:
-        chrom_length = GRCH37_AUTOSOME_LENGTHS[chr_num]
-        for region_start in range(1, chrom_length + 1, REGION_LENGTH):
-            region_end = region_start + REGION_LENGTH
-            stem = f"chr{chr_num}_{region_start}_{region_end}"
-            yield chr_num, region_start, region_end, stem
+    for stem in list_ukbb_ld_npz_stems():
+        match = LD_STEM_RE.match(stem)
+        if match is None:
+            continue
+        chr_num = int(match.group("chrom"))
+        if chrom is not None and chr_num != chrom:
+            continue
+        yield chr_num, int(match.group("start")), int(match.group("end")), stem
+
+
+def list_ukbb_ld_npz_stems() -> list[str]:
+    stems: list[str] = []
+    token: str | None = None
+    namespace = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+    while True:
+        params = {"list-type": "2", "prefix": "UKBB_LD/"}
+        if token is not None:
+            params["continuation-token"] = token
+        with urlopen(f"{UKBB_LD_BUCKET}/?{urlencode(params)}") as response:
+            root = ET.fromstring(response.read())
+        for key_node in root.findall("s3:Contents/s3:Key", namespace):
+            key = key_node.text or ""
+            if not key.endswith(".npz"):
+                continue
+            name = Path(key).name
+            stem = name.removesuffix(".npz")
+            if LD_STEM_RE.match(stem):
+                stems.append(stem)
+        truncated = root.findtext("s3:IsTruncated", default="false", namespaces=namespace)
+        if truncated.lower() != "true":
+            break
+        token = root.findtext("s3:NextContinuationToken", namespaces=namespace)
+        if token is None:
+            break
+    return sorted(stems, key=_ld_stem_sort_key)
+
+
+def _ld_stem_sort_key(stem: str) -> tuple[int, int, int]:
+    match = LD_STEM_RE.match(stem)
+    if match is None:
+        return (10**9, 10**9, 10**9)
+    return (int(match.group("chrom")), int(match.group("start")), int(match.group("end")))
 
 
 def _run_parallel_downloads(tasks: list[tuple[str, Path]], jobs: int) -> None:

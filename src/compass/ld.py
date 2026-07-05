@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+from pathlib import Path
 
 
 REGION_LENGTH = 3_000_000
@@ -135,6 +136,21 @@ def build_ukbb_ld_r2(
         if block_variants.empty:
             continue
 
+        stem_path = Path(pd.io.common.stringify_path(ld_dir)) / stem
+        if not stem_path.with_suffix(".gz").exists() or not stem_path.with_suffix(".npz").exists():
+            diagnostics.append(
+                {
+                    "chrom": chrom,
+                    "region_start": start,
+                    "region_end": end,
+                    "stem": stem,
+                    "annotation_variants": int(block_variants.shape[0]),
+                    "matched_variants": 0,
+                    "missing_ld_files": True,
+                }
+            )
+            continue
+
         meta = read_ukbb_ld_metadata(ld_dir, stem)
         by_variant_id = dict(zip(block_variants["variant_id"], block_variants["variant_idx"]))
         marker = block_variants.get("MarkerID")
@@ -152,6 +168,7 @@ def build_ukbb_ld_r2(
                 "stem": stem,
                 "annotation_variants": int(block_variants.shape[0]),
                 "matched_variants": int(hit.shape[0]),
+                "missing_ld_files": False,
             }
         )
         if hit.empty:
