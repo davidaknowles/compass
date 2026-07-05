@@ -53,22 +53,39 @@ def _cache_key(args, gwas_path: Path) -> str:
     return f"{args.annotation_value}.{intercept}.{gwas_path.name}.{n_samples}"
 
 
+def _frame_path(path: Path, extension: str) -> Path:
+    return Path(f"{path}{extension}")
+
+
 def _read_frame(path: Path) -> pd.DataFrame:
-    if path.with_suffix(".parquet").exists():
-        return pd.read_parquet(path.with_suffix(".parquet"))
-    return pd.read_pickle(path.with_suffix(".pkl"))
+    parquet = _frame_path(path, ".parquet")
+    pickle = _frame_path(path, ".pkl")
+    legacy_parquet = path.with_suffix(".parquet")
+    legacy_pickle = path.with_suffix(".pkl")
+    if parquet.exists():
+        return pd.read_parquet(parquet)
+    if pickle.exists():
+        return pd.read_pickle(pickle)
+    if legacy_parquet.exists():
+        return pd.read_parquet(legacy_parquet)
+    return pd.read_pickle(legacy_pickle)
 
 
 def _write_frame(df: pd.DataFrame, path: Path) -> None:
     try:
-        df.to_parquet(path.with_suffix(".parquet"), index=False)
+        df.to_parquet(_frame_path(path, ".parquet"), index=False)
     except ImportError:
-        df.to_pickle(path.with_suffix(".pkl"))
+        df.to_pickle(_frame_path(path, ".pkl"))
 
 
 def _load_gwas_cached(gwas_path: Path, cache_dir: Path, rebuild: bool) -> pd.DataFrame:
     cache = cache_dir / f"{gwas_path.name}.normalized"
-    if not rebuild and (cache.with_suffix(".parquet").exists() or cache.with_suffix(".pkl").exists()):
+    if not rebuild and (
+        _frame_path(cache, ".parquet").exists()
+        or _frame_path(cache, ".pkl").exists()
+        or cache.with_suffix(".parquet").exists()
+        or cache.with_suffix(".pkl").exists()
+    ):
         with _timed("load cached GWAS"):
             return _read_frame(cache)
     with _timed("parse GWAS"):
@@ -92,16 +109,17 @@ def _cache_paths(cache_dir: Path, key: str) -> dict[str, Path]:
 
 
 def _dataset_cache_exists(paths: dict[str, Path]) -> bool:
+    genes_exists = _frame_path(paths["genes"], ".parquet").exists() or _frame_path(paths["genes"], ".pkl").exists()
+    diagnostics_exists = _frame_path(paths["ld_diagnostics"], ".parquet").exists() or _frame_path(
+        paths["ld_diagnostics"], ".pkl"
+    ).exists()
     return (
         paths["A"].exists()
         and paths["R2"].exists()
         and paths["arrays"].exists()
         and paths["mechanisms"].exists()
-        and (paths["genes"].with_suffix(".parquet").exists() or paths["genes"].with_suffix(".pkl").exists())
-        and (
-            paths["ld_diagnostics"].with_suffix(".parquet").exists()
-            or paths["ld_diagnostics"].with_suffix(".pkl").exists()
-        )
+        and genes_exists
+        and diagnostics_exists
     )
 
 
