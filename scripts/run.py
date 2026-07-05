@@ -227,7 +227,12 @@ def main() -> None:
                 n_mechanisms=len(ann.mechanisms),
             )
         with _timed(f"build UKBB LD R2 with {args.ld_jobs} jobs"):
-            R2, ld_diagnostics = build_ukbb_ld_r2(variants, str(ld_dir), n_jobs=args.ld_jobs)
+            R2, ld_diagnostics = build_ukbb_ld_r2(
+                variants,
+                str(ld_dir),
+                n_jobs=args.ld_jobs,
+                progress_every=25,
+            )
 
         if args.n_samples is not None:
             n_samples: float | np.ndarray = float(args.n_samples)

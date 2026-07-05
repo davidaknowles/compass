@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -135,6 +135,14 @@ def _process_ukbb_ld_block(args):
 
     local_rows = hit["ld_row"].to_numpy(np.int64)
     global_rows = hit["target_variant_idx"].to_numpy(np.int64)
+    if global_rows.size == 1:
+        return (
+            diagnostic,
+            global_rows,
+            global_rows,
+            np.ones(1, dtype=np.float32),
+            global_rows,
+        )
     block_r2 = load_ukbb_ld_block_r2(ld_dir, stem, local_rows=local_rows, unbiased_n=unbiased_n)
     coo = block_r2.tocoo()
     return (
@@ -153,6 +161,7 @@ def build_ukbb_ld_r2(
     add_identity_for_missing: bool = True,
     unbiased_n: int | None = None,
     n_jobs: int = 1,
+    progress_every: int = 0,
 ) -> tuple[sp.csr_matrix, pd.DataFrame]:
     """Assemble UKBB LD R2 over COMPASS annotation variants.
 
@@ -185,9 +194,18 @@ def build_ukbb_ld_r2(
 
     if n_jobs > 1 and len(tasks) > 1:
         with ThreadPoolExecutor(max_workers=n_jobs) as pool:
-            results = list(pool.map(_process_ukbb_ld_block, tasks))
+            futures = [pool.submit(_process_ukbb_ld_block, task) for task in tasks]
+            results = []
+            for i, future in enumerate(as_completed(futures), start=1):
+                results.append(future.result())
+                if progress_every and (i % progress_every == 0 or i == len(futures)):
+                    print(f"[setup] processed LD blocks {i}/{len(futures)}", flush=True)
     else:
-        results = [_process_ukbb_ld_block(task) for task in tasks]
+        results = []
+        for i, task in enumerate(tasks, start=1):
+            results.append(_process_ukbb_ld_block(task))
+            if progress_every and (i % progress_every == 0 or i == len(tasks)):
+                print(f"[setup] processed LD blocks {i}/{len(tasks)}", flush=True)
 
     for diagnostic, row, col, val, matched_idx in results:
         diagnostics.append(diagnostic)
