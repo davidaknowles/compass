@@ -15,4 +15,5 @@ export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
 
 python scripts/run.py \
   --data-root /gpfs/commons/home/daknowles/knowles_lab/data/compass \
+  --ld-jobs "${COMPASS_LD_JOBS:-8}" \
   ${COMPASS_RUN_ARGS:-}

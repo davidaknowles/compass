@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-from pathlib import Path
 
 
 REGION_LENGTH = 3_000_000
@@ -102,12 +104,55 @@ def load_ukbb_ld_block_r2(
     return matrix
 
 
+def _process_ukbb_ld_block(args):
+    chrom, start, end, stem, block_variants, ld_dir, unbiased_n = args
+    diagnostic = {
+        "chrom": chrom,
+        "region_start": start,
+        "region_end": end,
+        "stem": stem,
+        "annotation_variants": int(block_variants.shape[0]),
+        "matched_variants": 0,
+        "missing_ld_files": False,
+    }
+    stem_path = Path(pd.io.common.stringify_path(ld_dir)) / stem
+    if not stem_path.with_suffix(".gz").exists() or not stem_path.with_suffix(".npz").exists():
+        diagnostic["missing_ld_files"] = True
+        return diagnostic, None, None, None, np.array([], dtype=np.int64)
+
+    meta = read_ukbb_ld_metadata(ld_dir, stem)
+    by_variant_id = dict(zip(block_variants["variant_id"], block_variants["variant_idx"]))
+    marker = block_variants.get("MarkerID")
+    by_marker = {} if marker is None else dict(zip(marker.astype(str), block_variants["variant_idx"]))
+    meta["target_variant_idx"] = meta["SNP"].astype(str).map(by_marker)
+    missing_snp_match = meta["target_variant_idx"].isna()
+    meta.loc[missing_snp_match, "target_variant_idx"] = meta.loc[missing_snp_match, "variant_id"].map(by_variant_id)
+    hit = meta.dropna(subset=["target_variant_idx"]).copy()
+    hit = hit.drop_duplicates("target_variant_idx")
+    diagnostic["matched_variants"] = int(hit.shape[0])
+    if hit.empty:
+        return diagnostic, None, None, None, np.array([], dtype=np.int64)
+
+    local_rows = hit["ld_row"].to_numpy(np.int64)
+    global_rows = hit["target_variant_idx"].to_numpy(np.int64)
+    block_r2 = load_ukbb_ld_block_r2(ld_dir, stem, local_rows=local_rows, unbiased_n=unbiased_n)
+    coo = block_r2.tocoo()
+    return (
+        diagnostic,
+        global_rows[coo.row],
+        global_rows[coo.col],
+        coo.data.astype(np.float32, copy=False),
+        global_rows,
+    )
+
+
 def build_ukbb_ld_r2(
     variants: pd.DataFrame,
     ld_dir: str,
     chromosomes: list[int] | None = None,
     add_identity_for_missing: bool = True,
     unbiased_n: int | None = None,
+    n_jobs: int = 1,
 ) -> tuple[sp.csr_matrix, pd.DataFrame]:
     """Assemble UKBB LD R2 over COMPASS annotation variants.
 
@@ -129,59 +174,29 @@ def build_ukbb_ld_r2(
     vals: list[np.ndarray] = []
     matched = np.zeros(n, dtype=bool)
     diagnostics: list[dict] = []
+    tasks = []
 
     for chrom, start, end, stem in blocks:
         in_block = variants["chrom"].eq(chrom) & variants["pos"].ge(start) & variants["pos"].lt(end)
         block_variants = variants.loc[in_block]
         if block_variants.empty:
             continue
+        tasks.append((chrom, start, end, stem, block_variants.copy(), ld_dir, unbiased_n))
 
-        stem_path = Path(pd.io.common.stringify_path(ld_dir)) / stem
-        if not stem_path.with_suffix(".gz").exists() or not stem_path.with_suffix(".npz").exists():
-            diagnostics.append(
-                {
-                    "chrom": chrom,
-                    "region_start": start,
-                    "region_end": end,
-                    "stem": stem,
-                    "annotation_variants": int(block_variants.shape[0]),
-                    "matched_variants": 0,
-                    "missing_ld_files": True,
-                }
-            )
-            continue
+    if n_jobs > 1 and len(tasks) > 1:
+        with ThreadPoolExecutor(max_workers=n_jobs) as pool:
+            results = list(pool.map(_process_ukbb_ld_block, tasks))
+    else:
+        results = [_process_ukbb_ld_block(task) for task in tasks]
 
-        meta = read_ukbb_ld_metadata(ld_dir, stem)
-        by_variant_id = dict(zip(block_variants["variant_id"], block_variants["variant_idx"]))
-        marker = block_variants.get("MarkerID")
-        by_marker = {} if marker is None else dict(zip(marker.astype(str), block_variants["variant_idx"]))
-        meta["target_variant_idx"] = meta["SNP"].astype(str).map(by_marker)
-        missing_snp_match = meta["target_variant_idx"].isna()
-        meta.loc[missing_snp_match, "target_variant_idx"] = meta.loc[missing_snp_match, "variant_id"].map(by_variant_id)
-        hit = meta.dropna(subset=["target_variant_idx"]).copy()
-        hit = hit.drop_duplicates("target_variant_idx")
-        diagnostics.append(
-            {
-                "chrom": chrom,
-                "region_start": start,
-                "region_end": end,
-                "stem": stem,
-                "annotation_variants": int(block_variants.shape[0]),
-                "matched_variants": int(hit.shape[0]),
-                "missing_ld_files": False,
-            }
-        )
-        if hit.empty:
-            continue
-
-        local_rows = hit["ld_row"].to_numpy(np.int64)
-        global_rows = hit["target_variant_idx"].to_numpy(np.int64)
-        block_r2 = load_ukbb_ld_block_r2(ld_dir, stem, local_rows=local_rows, unbiased_n=unbiased_n)
-        coo = block_r2.tocoo()
-        rows.append(global_rows[coo.row])
-        cols.append(global_rows[coo.col])
-        vals.append(coo.data.astype(np.float32, copy=False))
-        matched[global_rows] = True
+    for diagnostic, row, col, val, matched_idx in results:
+        diagnostics.append(diagnostic)
+        if row is not None and col is not None and val is not None:
+            rows.append(row)
+            cols.append(col)
+            vals.append(val)
+        if matched_idx.size:
+            matched[matched_idx] = True
 
     if add_identity_for_missing:
         missing = np.flatnonzero(~matched)

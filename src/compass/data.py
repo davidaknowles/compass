@@ -197,17 +197,22 @@ def load_gwas_sumstats(path: str | Path) -> pd.DataFrame:
 def make_training_table(variants: pd.DataFrame, gwas: pd.DataFrame) -> pd.DataFrame:
     """Align annotation variants to GWAS chi-square values."""
 
-    keys = []
     if "variant_id" in gwas.columns and "variant_id" in variants.columns:
-        keys.append("variant_id")
+        wanted = set(variants["variant_id"].astype(str))
+        gwas_pos = gwas[gwas["variant_id"].astype(str).isin(wanted)]
+        cols = ["variant_id", "chisq"] + (["n"] if "n" in gwas_pos else [])
+        merged = variants.merge(gwas_pos[cols].drop_duplicates("variant_id"), on="variant_id", how="inner")
+        if not merged.empty:
+            return merged
+
     if "snp" in gwas.columns:
         candidates = variants.rename(columns={"MarkerID": "snp"})
         if "snp" in candidates.columns:
-            merged = candidates.merge(gwas[["snp", "chisq"] + (["n"] if "n" in gwas else [])], on="snp")
+            wanted = set(candidates["snp"].astype(str))
+            gwas_snp = gwas[gwas["snp"].astype(str).isin(wanted)]
+            cols = ["snp", "chisq"] + (["n"] if "n" in gwas_snp else [])
+            merged = candidates.merge(gwas_snp[cols].drop_duplicates("snp"), on="snp", how="inner")
             if not merged.empty:
                 return merged
-    if not keys:
-        raise ValueError("GWAS file must contain chromosome/position or SNP IDs for alignment")
-    cols = ["variant_id", "chisq"] + (["n"] if "n" in gwas else [])
-    merged = variants.merge(gwas[cols], on="variant_id", how="inner")
-    return merged
+
+    raise ValueError("GWAS file must contain chromosome/position or SNP IDs for alignment")

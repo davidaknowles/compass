@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 
 from compass.data import load_gwas_sumstats, load_top_assoc_annotations, make_training_table
 from compass.ld import annotation_triples_to_csr, build_ukbb_ld_r2
@@ -36,6 +39,115 @@ def _json_safe(value):
     return value
 
 
+@contextmanager
+def _timed(label: str):
+    start = perf_counter()
+    print(f"[setup] start {label}", flush=True)
+    yield
+    print(f"[setup] done {label}: {perf_counter() - start:.2f}s", flush=True)
+
+
+def _cache_key(args, gwas_path: Path) -> str:
+    intercept = "intercept" if not args.no_intercept else "nointercept"
+    n_samples = "gwas" if args.n_samples is None else f"n{args.n_samples:g}"
+    return f"{args.annotation_value}.{intercept}.{gwas_path.name}.{n_samples}"
+
+
+def _read_frame(path: Path) -> pd.DataFrame:
+    if path.with_suffix(".parquet").exists():
+        return pd.read_parquet(path.with_suffix(".parquet"))
+    return pd.read_pickle(path.with_suffix(".pkl"))
+
+
+def _write_frame(df: pd.DataFrame, path: Path) -> None:
+    try:
+        df.to_parquet(path.with_suffix(".parquet"), index=False)
+    except ImportError:
+        df.to_pickle(path.with_suffix(".pkl"))
+
+
+def _load_gwas_cached(gwas_path: Path, cache_dir: Path, rebuild: bool) -> pd.DataFrame:
+    cache = cache_dir / f"{gwas_path.name}.normalized"
+    if not rebuild and (cache.with_suffix(".parquet").exists() or cache.with_suffix(".pkl").exists()):
+        with _timed("load cached GWAS"):
+            return _read_frame(cache)
+    with _timed("parse GWAS"):
+        gwas = load_gwas_sumstats(gwas_path)
+    with _timed("write GWAS cache"):
+        _write_frame(gwas, cache)
+    return gwas
+
+
+def _cache_paths(cache_dir: Path, key: str) -> dict[str, Path]:
+    prefix = cache_dir / key
+    return {
+        "A": prefix.with_suffix(".A.npz"),
+        "R2": prefix.with_suffix(".R2.npz"),
+        "arrays": prefix.with_suffix(".arrays.npz"),
+        "genes": prefix.with_suffix(".genes"),
+        "mechanisms": prefix.with_suffix(".mechanisms.json"),
+        "ld_diagnostics": prefix.with_suffix(".ld_diagnostics"),
+        "metadata": prefix.with_suffix(".metadata.json"),
+    }
+
+
+def _dataset_cache_exists(paths: dict[str, Path]) -> bool:
+    return (
+        paths["A"].exists()
+        and paths["R2"].exists()
+        and paths["arrays"].exists()
+        and paths["mechanisms"].exists()
+        and (paths["genes"].with_suffix(".parquet").exists() or paths["genes"].with_suffix(".pkl").exists())
+        and (
+            paths["ld_diagnostics"].with_suffix(".parquet").exists()
+            or paths["ld_diagnostics"].with_suffix(".pkl").exists()
+        )
+    )
+
+
+def _load_dataset_cache(paths: dict[str, Path]):
+    with _timed("load dataset cache"):
+        A = sp.load_npz(paths["A"])
+        R2 = sp.load_npz(paths["R2"])
+        arrays = np.load(paths["arrays"], allow_pickle=False)
+        genes = _read_frame(paths["genes"])
+        ld_diagnostics = _read_frame(paths["ld_diagnostics"])
+        with open(paths["mechanisms"], encoding="utf-8") as handle:
+            mechanisms = json.load(handle)
+    dataset = CompassDataset(
+        A=A,
+        R2=R2,
+        chisq=arrays["chisq"],
+        chrom=arrays["chrom"],
+        n_samples=arrays["n_samples"],
+    )
+    return dataset, genes, mechanisms, ld_diagnostics, str(arrays["n_samples_source"])
+
+
+def _write_dataset_cache(
+    paths: dict[str, Path],
+    dataset: CompassDataset,
+    genes: pd.DataFrame,
+    mechanisms: list[str],
+    ld_diagnostics: pd.DataFrame,
+    n_samples_source: str,
+) -> None:
+    with _timed("write dataset cache"):
+        sp.save_npz(paths["A"], dataset.A)
+        sp.save_npz(paths["R2"], dataset.R2)
+        np.savez_compressed(
+            paths["arrays"],
+            chisq=dataset.chisq,
+            chrom=dataset.chrom,
+            n_samples=np.asarray(dataset.n_samples, dtype=np.float32),
+            n_samples_source=np.asarray(n_samples_source),
+        )
+        _write_frame(genes, paths["genes"])
+        _write_frame(ld_diagnostics, paths["ld_diagnostics"])
+        with open(paths["mechanisms"], "w", encoding="utf-8") as handle:
+            json.dump(mechanisms, handle)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run genome-wide COMPASS with UKBB LD.")
     parser.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
@@ -57,6 +169,10 @@ def main() -> None:
     parser.add_argument("--svd-rank", type=int, default=None)
     parser.add_argument("--svd-oversamples", type=int, default=5)
     parser.add_argument("--svd-n-iter", type=int, default=2)
+    parser.add_argument("--ld-jobs", type=int, default=8)
+    parser.add_argument("--cache-dir", default=None)
+    parser.add_argument("--rebuild-cache", action="store_true")
+    parser.add_argument("--setup-only", action="store_true")
     parser.add_argument("--run-name", default=None)
     args = parser.parse_args()
 
@@ -65,7 +181,9 @@ def main() -> None:
     gwas_path = Path(args.gwas).expanduser() if args.gwas else data_root / "raw" / "ad_gwas" / "AD_sumstats_Jansenetal_2019sept.txt.gz"
     ld_dir = Path(args.ld_dir).expanduser() if args.ld_dir else data_root / "raw" / "ukbb_ld"
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else data_root / "results"
+    cache_dir = Path(args.cache_dir).expanduser() if args.cache_dir else data_root / "cache"
     out_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     if args.device == "auto":
         import torch
@@ -74,67 +192,89 @@ def main() -> None:
     else:
         device = args.device
 
-    ann = load_top_assoc_annotations(
-        top_assoc_dir,
-        annotation_value=args.annotation_value,
-        add_intercept=not args.no_intercept,
-    )
-    gwas = load_gwas_sumstats(gwas_path)
-    training = make_training_table(ann.variants, gwas)
-    training = training.drop_duplicates("variant_idx").sort_values("variant_idx").reset_index(drop=True)
-    if training.empty:
-        raise ValueError("No annotation variants aligned to GWAS summary statistics")
-
-    old_variant_idx = training["variant_idx"].to_numpy(np.int64)
-    variants = ann.variants.iloc[old_variant_idx].copy().reset_index(drop=True)
-    variants["variant_idx"] = np.arange(variants.shape[0], dtype=np.int64)
-    old_to_new = pd.DataFrame(
-        {"variant_idx": old_variant_idx, "new_variant_idx": variants["variant_idx"].to_numpy(np.int64)}
-    )
-    triples = ann.triples.merge(old_to_new, on="variant_idx", how="inner")
-    triples = triples.drop(columns=["variant_idx"]).rename(columns={"new_variant_idx": "variant_idx"})
-
-    A = annotation_triples_to_csr(
-        triples,
-        n_variants=variants.shape[0],
-        n_genes=ann.genes.shape[0],
-        n_mechanisms=len(ann.mechanisms),
-    )
-    R2, ld_diagnostics = build_ukbb_ld_r2(variants, str(ld_dir))
-
-    if args.n_samples is not None:
-        n_samples: float | np.ndarray = float(args.n_samples)
-        n_samples_source = "argument"
-    elif "n" in training.columns and training["n"].notna().all():
-        n_samples = training["n"].to_numpy(np.float32)
-        n_samples_source = "gwas"
+    key = _cache_key(args, gwas_path)
+    paths = _cache_paths(cache_dir, key)
+    if not args.rebuild_cache and _dataset_cache_exists(paths):
+        dataset, genes, mechanisms, ld_diagnostics, n_samples_source = _load_dataset_cache(paths)
     else:
-        raise ValueError("Known sample sizes are required: pass --n-samples or use a GWAS file with Nsum/Neff/N")
+        with _timed("load annotations"):
+            ann = load_top_assoc_annotations(
+                top_assoc_dir,
+                annotation_value=args.annotation_value,
+                add_intercept=not args.no_intercept,
+            )
+        gwas = _load_gwas_cached(gwas_path, cache_dir, args.rebuild_cache)
+        with _timed("align GWAS"):
+            training = make_training_table(ann.variants, gwas)
+            training = training.drop_duplicates("variant_idx").sort_values("variant_idx").reset_index(drop=True)
+            if training.empty:
+                raise ValueError("No annotation variants aligned to GWAS summary statistics")
 
-    dataset = CompassDataset(
-        A=A,
-        R2=R2,
-        chisq=training["chisq"].to_numpy(np.float32),
-        chrom=variants["chrom"].to_numpy(np.int64),
-        n_samples=n_samples,
-    )
+        old_variant_idx = training["variant_idx"].to_numpy(np.int64)
+        variants = ann.variants.iloc[old_variant_idx].copy().reset_index(drop=True)
+        variants["variant_idx"] = np.arange(variants.shape[0], dtype=np.int64)
+        old_to_new = pd.DataFrame(
+            {"variant_idx": old_variant_idx, "new_variant_idx": variants["variant_idx"].to_numpy(np.int64)}
+        )
+        triples = ann.triples.merge(old_to_new, on="variant_idx", how="inner")
+        triples = triples.drop(columns=["variant_idx"]).rename(columns={"new_variant_idx": "variant_idx"})
 
-    fit = fit_nuclear_norm_path(
-        dataset,
-        n_genes=ann.genes.shape[0],
-        n_mechanisms=len(ann.mechanisms),
-        lambdas=args.lambdas,
-        cv=args.cv,
-        lr=args.lr,
-        max_iter=args.max_iter,
-        tol=args.tol,
-        device=device,
-        use_precomputed=args.use_precomputed,
-        svd_method=args.svd_method,
-        svd_rank=args.svd_rank,
-        svd_oversamples=args.svd_oversamples,
-        svd_n_iter=args.svd_n_iter,
+        with _timed("build annotation matrix"):
+            A = annotation_triples_to_csr(
+                triples,
+                n_variants=variants.shape[0],
+                n_genes=ann.genes.shape[0],
+                n_mechanisms=len(ann.mechanisms),
+            )
+        with _timed(f"build UKBB LD R2 with {args.ld_jobs} jobs"):
+            R2, ld_diagnostics = build_ukbb_ld_r2(variants, str(ld_dir), n_jobs=args.ld_jobs)
+
+        if args.n_samples is not None:
+            n_samples: float | np.ndarray = float(args.n_samples)
+            n_samples_source = "argument"
+        elif "n" in training.columns and training["n"].notna().all():
+            n_samples = training["n"].to_numpy(np.float32)
+            n_samples_source = "gwas"
+        else:
+            raise ValueError("Known sample sizes are required: pass --n-samples or use a GWAS file with Nsum/Neff/N")
+
+        dataset = CompassDataset(
+            A=A,
+            R2=R2,
+            chisq=training["chisq"].to_numpy(np.float32),
+            chrom=variants["chrom"].to_numpy(np.int64),
+            n_samples=n_samples,
+        )
+        genes = ann.genes
+        mechanisms = ann.mechanisms
+        _write_dataset_cache(paths, dataset, genes, mechanisms, ld_diagnostics, n_samples_source)
+
+    print(
+        f"[setup] dataset variants={dataset.n_variants} params={dataset.n_params} "
+        f"A_nnz={dataset.A.nnz} R2_nnz={dataset.R2.nnz}",
+        flush=True,
     )
+    if args.setup_only:
+        print("[setup] setup-only complete", flush=True)
+        return
+
+    with _timed("fit"):
+        fit = fit_nuclear_norm_path(
+            dataset,
+            n_genes=genes.shape[0],
+            n_mechanisms=len(mechanisms),
+            lambdas=args.lambdas,
+            cv=args.cv,
+            lr=args.lr,
+            max_iter=args.max_iter,
+            tol=args.tol,
+            device=device,
+            use_precomputed=args.use_precomputed,
+            svd_method=args.svd_method,
+            svd_rank=args.svd_rank,
+            svd_oversamples=args.svd_oversamples,
+            svd_n_iter=args.svd_n_iter,
+        )
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_name = args.run_name or f"compass-{stamp}"
@@ -148,7 +288,7 @@ def main() -> None:
         lambdas=np.asarray(fit.lambdas, dtype=np.float32),
         best_lambda=np.asarray(fit.best_lambda, dtype=np.float32),
     )
-    pd.DataFrame(fit.B, index=ann.genes["gene"], columns=ann.mechanisms).to_csv(f"{prefix}.B.tsv", sep="\t")
+    pd.DataFrame(fit.B, index=genes["gene"], columns=mechanisms).to_csv(f"{prefix}.B.tsv", sep="\t")
     ld_diagnostics.to_csv(f"{prefix}.ld_diagnostics.tsv", sep="\t", index=False)
     metadata = {
         "method": fit.method,
@@ -156,13 +296,15 @@ def main() -> None:
         "cv_scores": fit.cv_scores,
         "metadata": fit.metadata,
         "n_variants": dataset.n_variants,
-        "n_genes": ann.genes.shape[0],
-        "n_mechanisms": len(ann.mechanisms),
+        "n_genes": genes.shape[0],
+        "n_mechanisms": len(mechanisms),
         "n_samples_source": n_samples_source,
         "device": device,
         "use_precomputed": args.use_precomputed,
         "svd_method": args.svd_method,
         "svd_rank": args.svd_rank,
+        "ld_jobs": args.ld_jobs,
+        "cache_key": key,
     }
     with open(f"{prefix}.metadata.json", "w", encoding="utf-8") as handle:
         json.dump(_json_safe(metadata), handle, indent=2, sort_keys=True)
