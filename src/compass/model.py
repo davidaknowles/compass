@@ -440,7 +440,10 @@ def fit_nuclear_norm_path(
     init_B = None
     init_tau = 1e-8
     losses_all: list[float] = []
-    metadata = {}
+    metadata = {
+        "cv_method": "leave_one_chromosome" if cv else None,
+        "cv_folds": sorted(np.unique(dataset.chrom).astype(int).tolist()) if cv else None,
+    }
     B = None
     tau = init_tau
     for lam in ordered:
@@ -472,7 +475,10 @@ def fit_rank1_path(
     init_w = None
     init_tau = 1e-8
     losses_all: list[float] = []
-    metadata = {}
+    metadata = {
+        "cv_method": "leave_one_chromosome" if cv else None,
+        "cv_folds": sorted(np.unique(dataset.chrom).astype(int).tolist()) if cv else None,
+    }
     B = None
     tau = init_tau
     for lam in ordered:

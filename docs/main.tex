@@ -1,143 +1,159 @@
 \documentclass[11pt]{article}
-\usepackage{amsmath, amssymb, amsfonts, booktabs, geometry, algorithm, algpseudocode}
-\usepackage{hyperref}
-
+\usepackage{amsmath, amssymb, booktabs, geometry, hyperref}
 \geometry{letterpaper, margin=1in}
 
-\title{COMPASS: Convex Optimization of Mediated Polygenic Architecture via SNP Scores}
+\title{Genome-wide COMPASS analysis of Alzheimer disease summary statistics}
 \author{}
-\date{}
+\date{July 2026}
 
 \begin{document}
-
 \maketitle
 
 \begin{abstract}
-We present a unified methodological framework for estimating gene-specific mediated heritability from genome-wide association study (GWAS) summary statistics using predictive sequence-to-function annotations. While standard Mediated Expression Score Regression (MESC) relies on observed eQTL effect sizes, incorporating deterministic, multi-mechanism annotations (e.g., deep learning accessibility predictions, Hi-C contact frequencies) introduces an unknown annotation-weight vector, transforming the gene-level inference problem into a non-convex, bilinear trap. We demonstrate that relaxing the strict rank-1 assumption ($B = s w^T$) to a general gene-by-mechanism heritability matrix $B \in \mathbb{R}_{+}^{K \times L}$ regularized by the nuclear norm ($\|B\|_*$) yields a strictly convex optimization landscape. This formulation natively identifies modular, multi-mechanism regulatory architectures across disease genes. Furthermore, we prove that enforcing strict non-negativity ($B_{kl} \ge 0$) is essential to prevent ``LD cancellation cheats,'' where collinear linkage disequilibrium among adjacent genes creates artificial, mutually cancelling positive and negative causal effect estimates. Finally, we provide an alternating projection algorithm combining Singular Value Thresholding (SVT) and non-negative clipping to fit the model efficiently at genome-wide scale.
+COMPASS estimates gene-by-context mediated trait contributions from GWAS
+summary statistics, SNP-to-gene annotations, and linkage disequilibrium (LD).
+We applied a non-negative nuclear-norm relaxation of the COMPASS model to
+Alzheimer disease (AD) summary statistics using SingleBrain top eQTL
+annotations and UK Biobank LD. The genome-wide design contained 76,101 aligned
+variants, 15,363 genes, and eight annotation contexts including an intercept and
+seven brain cell-type annotations. The regularization parameter was selected by
+full leave-one-chromosome cross-validation. Cross-validation favored the
+strongest penalties tested; the selected model was the all-zero mediated fit.
+Consequently, the primary analysis did not implicate global or cell-type-specific
+AD genes, and ordered g:Profiler gene-set enrichment had no positive ranked gene
+list to test. A weaker, non-selected sensitivity fit at $\lambda=100$ produced
+four very small positive gene scores, but these did not yield significant
+enrichment and should not be interpreted as discoveries.
 \end{abstract}
 
-\section{Introduction and Generative Framework}
-Let $\omega_j$ denote the marginal effect of single nucleotide polymorphism (SNP) $j \in \{1, \dots, J\}$ on a complex trait. We model $\omega_j$ as a causal cascade mediated through genes $k \in \{1, \dots, K\}$:
+\section{Model}
+
+Let $\chi_j^2$ be the marginal GWAS statistic for variant $j$ and let
+$a_{jkl} \geq 0$ denote the annotation linking variant $j$ to gene $k$ in
+context $l$. The context index can represent a biochemical mechanism, an
+intercept, or a cell type. LD-smoothed annotations are
 \begin{equation}
-    \omega_j = \sum_{k=1}^K \beta_{jk} \alpha_k + \gamma_j
+    T_{jkl} = \sum_m r_{jm}^2 a_{mkl},
 \end{equation}
-where $\beta_{jk}$ is the true, unobserved regulatory effect of SNP $j$ on gene $k$, $\alpha_k$ is the causal effect of gene $k$ on the trait, and $\gamma_j \sim \mathcal{N}(0, \tau_\gamma)$ captures non-mediated (direct or pleiotropic) effects. 
-
-Instead of relying on empirical eQTLs, we utilize $L$ non-negative annotations $a_{jkl} \ge 0$ representing the predicted regulatory potential of SNP $j$ on gene $k$ via biological mechanism $l \in \{1, \dots, L\}$. We place a linear variance prior on the regulatory effects:
+where $r_{jm}^2$ is squared LD. COMPASS models the expected summary statistic as
 \begin{equation}
-    \beta_{jk} \sim \mathcal{N}(0, V_{jk}) \quad \text{where} \quad V_{jk} = \sum_{l=1}^L w_l a_{jkl}
+    E[\chi_j^2] =
+    1 + N_j \left(\sum_{k,l} B_{kl} T_{jkl} + \tau l_j \right),
 \end{equation}
-Here, $w_l \ge 0$ represents the unknown heritability contribution weight of mechanism $l$.
-
-\section{The Bilinear Trap of Gene-Specific LD Scores}
-To achieve gene-specific resolution without relying on infinitesimal Gaussian assumptions for $\alpha_k$, we condition the variance of the marginal effect on the specific causal trait variance of each gene, $s_k = \alpha_k^2 \ge 0$:
+where $B_{kl} \geq 0$ is the mediated contribution of gene $k$ through context
+$l$, $\tau \geq 0$ is a residual polygenic component, and
+$l_j=\sum_m r_{jm}^2$ is the LD score. The fitted objective is
 \begin{equation}
-    \text{Var}(\omega_j \mid \alpha, w) = \sum_{k=1}^K s_k V_{jk} + \tau_\gamma
+    \min_{B \geq 0,\tau \geq 0}
+    \frac{1}{J}\sum_j w_j
+    \left\{\chi_j^2 - 1 - N_j \left(\sum_{k,l} B_{kl}T_{jkl}+\tau l_j\right)\right\}^2
+    + \lambda \|B\|_* .
 \end{equation}
-Substituting this conditional variance into the expected GWAS $\chi^2$ statistic yields:
-\begin{align}
-    \mathbb{E}[\chi_j^2 \mid \alpha, w] &= 1 + N \sum_{m=1}^J r_{jm}^2 \text{Var}(\omega_m \mid \alpha, w) \nonumber \\
-    &= 1 + N \sum_{m=1}^J r_{jm}^2 \left( \sum_{k=1}^K s_k \sum_{l=1}^L w_l a_{mkl} + \tau_\gamma \right)
-\end{align}
-Because the summations over $k$ and $l$ are independent of the Linkage Disequilibrium (LD) correlation $r_{jm}^2$, we commute the operations and define the deterministic, pre-computable, sparse \textbf{3D Annotation-Gene LD Tensor}, $\mathcal{T}_{jkl}$:
-\begin{equation}
-    \mathcal{T}_{jkl} = \sum_{m=1}^J r_{jm}^2 a_{mkl}
-\end{equation}
-The expected summary statistic equation simplifies to:
-\begin{equation}
-    \mathbb{E}[\chi_j^2 \mid \alpha, w] = 1 + N \sum_{k=1}^K \sum_{l=1}^L (s_k w_l) \mathcal{T}_{jkl} + N \tau_\gamma l_j
-\end{equation}
-where $l_j = \sum_m r_{jm}^2$ is the standard non-mediated LD score. 
+The nuclear norm encourages shared low-rank gene-by-context structure while the
+non-negativity constraint prevents LD-correlated neighboring genes from fitting
+the same signal through cancelling positive and negative coefficients. The
+strict rank-1 alternative, $B=s w^\top$, was retained only as an optimization
+baseline because it imposes a single global context profile on all genes.
 
-\subsection{Optimization Hazards of the Rank-1 Formulation}
-Let $B_{kl} = s_k w_l$ define the $K \times L$ matrix of mediated heritability contributions. Forcing $B$ to be parameterized as the outer product of two vectors ($B = s w^T$, strictly rank-1) introduces two severe optimization pathologies:
-\begin{enumerate}
-    \item \textbf{Scale Non-Identifiability:} For any scalar $c > 0$, the transformation $s \to s/c$ and $w \to c w$ leaves the product $B = s w^T$ unchanged, rendering the individual scales of gene importance and annotation importance unidentifiable without arbitrary anchor priors.
-    \item \textbf{Non-Convexity:} The bilinear optimization landscape $\min_{s, w} \mathcal{L}(\chi^2, s w^T)$ is non-convex, containing numerous saddle points and local minima where gradient-based inference routines can get trapped by attributing heritability to noisy annotations that spuriously align with local LD block structures.
-\end{enumerate}
+\section{Data and implementation}
 
-\section{Convex Nuclear Norm Relaxation}
-To circumvent the bilinear trap, we relax the strict rank-1 constraint $B = s w^T$ by treating $B \in \mathbb{R}^{K \times L}$ as a general matrix parameter regularized by the nuclear norm $\|B\|_* = \sum_i \sigma_i(B)$, where $\sigma_i(B)$ are the singular values of $B$.
+We used the Jansen et al. AD GWAS summary statistics distributed as
+\texttt{AD\_sumstats\_Jansenetal\_2019sept.txt.gz}. Variant-to-gene annotations
+were built from SingleBrain top eQTL associations for astrocytes, endothelial
+cells, excitatory neurons, inhibitory neurons, microglia, oligodendrocytes, and
+OPCs, with one intercept context per variant-gene pair. LD was assembled from
+all downloaded UK Biobank LD \texttt{.npz} blocks and their metadata sidecars.
+Sample sizes were read from the GWAS file; runs without known sample sizes are
+rejected.
 
-We formulate the inference as a Weighted Ordinary Least Squares (WOLS) regression minimized over the space of non-negative matrices:
-\begin{equation}
-    \min_{B \in \mathbb{R}_{+}^{K \times L}, \; \tau_\gamma \ge 0} \quad \sum_{j=1}^J \hat{w}_j \left( \chi_j^2 - 1 - N \sum_{k=1}^K \sum_{l=1}^L B_{kl} \mathcal{T}_{jkl} - N \tau_\gamma l_j \right)^2 + \lambda \|B\|_*
-\end{equation}
-where $\hat{w}_j$ are standard S-LDSC regression weights accounting for LD redundancy and heteroskedasticity.
+The cached genome-wide design contained 76,101 variants and 122,904
+gene-context parameters. The sparse annotation matrix had 166,253 nonzero
+entries and the aligned LD matrix had 7,829,001 nonzero entries. Initial LD
+assembly was the dominant setup cost, but the cached dataset subsequently loaded
+in less than one second. The final high-penalty cross-validation run used a GPU
+and completed the fit stage in 144 seconds.
 
-\subsection{Theoretical and Biological Implications}
-This relaxation yields three profound advantages:
-\begin{itemize}
-    \item \textbf{Strict Convexity:} Because the WOLS loss is convex with respect to $B$ and the nuclear norm is the convex envelope of the rank function, the objective is strictly convex, guaranteeing that any local minimum is the unique global optimum.
-    \item \textbf{Discovery of Regulatory Modules:} Rather than enforcing regulatory homogeneity (where every causal gene obeys the exact same regulatory weight vector $w$), a low-rank solution $\text{rank}(B) = r > 1$ decomposes into $r$ distinct mechanistic archetypes via Singular Value Decomposition (SVD):
-    \begin{equation}
-        B = \sum_{i=1}^r \sigma_i u_i v_i^T
-    \end{equation}
-    Here, the right singular vectors $v_i \in \mathbb{R}^L$ represent distinct biological pathways (e.g., promoter-driven vs. distal Hi-C loop enhancer-driven), while the left singular vectors $u_i \in \mathbb{R}^K$ cluster disease genes by their physical mechanism of action.
-    \item \textbf{Computational Tractability:} Because the number of annotations ($L \approx 10^2$) is much smaller than the number of genes ($K \approx 20,000$), computing the reduced SVD during optimization takes $O(K L^2)$ time, requiring only milliseconds per iteration on modern hardware.
-\end{itemize}
+\section{Lambda selection}
 
-\section{Cell-Type Indexing Gives the Same Model}
-The index $l$ need not correspond to a biochemical mechanism such as promoter activity, enhancer activity, or chromatin contact class. The same derivation applies if $l$ indexes cell types or cellular contexts. In that case,
-\begin{equation}
-    a_{jkl} \equiv a_{jk}^{(l)}
-\end{equation}
-denotes the predicted regulatory potential of SNP $j$ on gene $k$ in cell type $l$, and the LD-smoothed tensor becomes
-\begin{equation}
-    \mathcal{T}_{jkl} = \sum_{m=1}^J r_{jm}^2 a_{mk}^{(l)}.
-\end{equation}
-Substituting this cell-type-specific annotation tensor into the expected $\chi^2$ equation gives
-\begin{equation}
-    \mathbb{E}[\chi_j^2 \mid \alpha, w] = 1 + N \sum_{k=1}^K \sum_{l=1}^L (s_k w_l) \mathcal{T}_{jkl} + N \tau_\gamma l_j,
-\end{equation}
-which is algebraically identical to the mechanism-indexed model. The rank-1 version still assumes that all genes share a single global cell-type relevance vector $w$, scaled only by the gene-level causal variance $s_k$.
+The penalty $\lambda$ was selected by full leave-one-chromosome
+cross-validation. For each chromosome, the model was fit on the remaining 21
+chromosomes and evaluated on the held-out chromosome. The final grid was widened
+after earlier grids selected their upper endpoint. The broad grid showed that
+the optimum had reached the zero-mediated plateau (Table~\ref{tab:lambda}).
 
-The convex relaxation is therefore also unchanged:
-\begin{equation}
-    \min_{B \in \mathbb{R}_{+}^{K \times L}, \; \tau_\gamma \ge 0} \quad \sum_{j=1}^J \hat{w}_j \left( \chi_j^2 - 1 - N \sum_{k=1}^K \sum_{l=1}^L B_{kl} \mathcal{T}_{jkl} - N \tau_\gamma l_j \right)^2 + \lambda \|B\|_*.
-\end{equation}
-The only change is interpretive: $B_{kl}$ is now the non-negative mediated heritability contribution of gene $k$ through cell type $l$. A low-rank solution allows genes to share a small number of recurrent cell-type programs, while avoiding the restrictive assumption that every gene has the same cell-type profile. Under the SVD interpretation, the right singular vectors $v_i$ represent cell-type axes and the left singular vectors $u_i$ identify genes loading onto those axes. Because related cell types may have highly correlated annotations, the most stable object may be a cell-type program rather than a single uniquely resolved cell type.
+\begin{table}[h]
+\centering
+\begin{tabular}{rr}
+\toprule
+$\lambda$ & mean held-out squared error \\
+\midrule
+100000 & 163.960192995 \\
+30000  & 163.960192995 \\
+10000  & 163.960192995 \\
+3000   & 163.960192995 \\
+1000   & 163.960192995 \\
+300    & 163.960192995 \\
+100    & 163.960196300 \\
+\bottomrule
+\end{tabular}
+\caption{Leave-one-chromosome cross-validation over the final high-penalty grid.
+The identical scores from $\lambda=300$ through $100000$ indicate that the
+selected model is on the null mediated plateau.}
+\label{tab:lambda}
+\end{table}
 
-\section{The Critical Necessity of Non-Negativity}
-While standard summary statistic methods occasionally tolerate negative enrichment parameters, enforcing $B_{kl} \ge 0$ is mandatory in this gene-centric framework. Without non-negativity constraints, the optimization landscape suffers from two catastrophic failures:
+The selected run used $\lambda=100000$ and produced $B=0$ for all 15,363 genes
+and all eight contexts. The total mediated score, the number of positive
+gene-context entries, and the number of positive genes were all zero. Thus the
+primary COMPASS fit does not support a detectable mediated AD component from
+these top-eQTL annotations under the present objective and weighting scheme.
 
-\subsection{Preventing LD Collinearity Overfitting (The Cancellation Cheat)}
-Neighboring genes on a chromosome reside within the same topological LD block, causing their annotation tensors to be highly collinear ($\mathcal{T}_{j, k_1, l} \approx \mathcal{T}_{j, k_2, l}$ for adjacent genes $k_1, k_2$). If an unconstrained model attempts to fit a localized GWAS signal corresponding to a true heritability contribution of $+10$, it can overfit statistical noise by assigning extreme, mutually cancelling coefficients to adjacent genes:
-\begin{equation}
-    B_{k_1, l} = +100 \quad \text{and} \quad B_{k_2, l} = -90 \quad \implies \quad B_{k_1, l} + B_{k_2, l} = +10
-\end{equation}
-This ``cancellation cheat'' preserves the macroscopic model fit while destroying gene-level resolution, creating massive phantom causal effects. The constraint $B_{kl} \ge 0$ acts as a structural regularizer against LD collinearity, forcing the model to assign heritability exclusively to the most parsimonious gene.
+\section{Alternating rank-1 baseline}
 
-\subsection{Mathematical and Biological Plausibility}
-By definition, $B_{kl} = \alpha_k^2 w_l$ represents the variance of the causal trait effect mediated by gene $k$ via mechanism $l$. Variance cannot be negative. Furthermore, because $\mathcal{T}_{jkl} \ge 0$, allowing negative entries in $B$ permits the model to predict $\mathbb{E}[\chi_j^2] < 1$, implying that genetic variation suppresses sampling noise—a statistical impossibility under the null hypothesis.
+The alternating rank-1 optimizer was evaluated with the same
+leave-one-chromosome selection scheme on a lower penalty grid. Its held-out
+errors were on the order of $10^{16}$, compared with approximately 164 for the
+nuclear-norm fit. The resulting rank-1 matrix was dense across essentially all
+genes and did not provide a useful sparse or stable AD gene ranking. This
+baseline is therefore not useful for the present data except as a negative
+control demonstrating the practical value of the convex relaxation.
 
-\section{Optimization via Alternating Projections}
-Because standard Singular Value Thresholding (SVT) introduces orthogonal vectors with negative values, we must solve a Non-Negative Low-Rank Matrix Approximation problem. We solve this efficiently using Proximal Gradient Descent with Dykstra's Alternating Projections.
+\section{Gene ranking and enrichment}
 
-Let $f(B, \tau_\gamma)$ denote the WOLS loss function from Equation (7). The algorithm proceeds as follows:
+For the primary CV-selected fit, global gene scores were defined as row sums of
+$B$, and cell-type-specific scores were defined by the corresponding columns of
+$B$. Because every entry of $B$ was zero, there were no positive global,
+astrocyte, endothelial, excitatory neuron, inhibitory neuron, microglia,
+oligodendrocyte, or OPC gene lists. Ordered g:Profiler enrichment was run with
+the 15,363 assayed genes as the custom background, but no primary enrichment
+test was possible because the positive ranked lists were empty.
 
-\begin{algorithm}[H]
-\caption{Non-Negative Low-Rank Gene Heritability Regression}
-\begin{algorithmic}[1]
-\State \textbf{Input:} Pre-computed tensor $\mathcal{T} \in \mathbb{R}_{+}^{J \times K \times L}$, GWAS $\chi^2 \in \mathbb{R}^J$, LD scores $l \in \mathbb{R}^J$, step size $\eta$, regularization $\lambda$.
-\State \textbf{Initialize:} $B^{(0)} \gets \mathbf{0}_{K \times L}$, $\tau_\gamma^{(0)} \gets 0$
-\While{not converged}
-    \State \textbf{1. Gradient Step:}
-    \State $G^{(t)} \gets B^{(t)} - \eta \nabla_B f(B^{(t)}, \tau_\gamma^{(t)})$
-    \State $\tau_\gamma^{(t+1)} \gets \max\left(0, \; \tau_\gamma^{(t)} - \eta \nabla_{\tau_\gamma} f(B^{(t)}, \tau_\gamma^{(t)})\right)$
-    
-    \State \textbf{2. Singular Value Thresholding (Low-Rank Projection):}
-    \State Compute reduced SVD: $U, \Sigma, V^T = \text{SVD}(G^{(t)})$
-    \State $\tilde{\Sigma} \gets \text{diag}\left(\max(0, \; \sigma_i - \eta \lambda)\right)$
-    \State $B_{\text{SVT}} \gets U \tilde{\Sigma} V^T$
-    
-    \State \textbf{3. Non-Negative Projection:}
-    \State $B^{(t+1)} \gets \max\left(\mathbf{0}_{K \times L}, \; B_{\text{SVT}}\right)$
-\EndWhile
-\State \textbf{Output:} Modular heritability matrix $B^* = B^{(t+1)}$, background pleiotropy $\tau_\gamma^* = \tau_\gamma^{(t+1)}$.
-\end{algorithmic}
-\end{algorithm}
+As a sensitivity analysis, the adjacent weaker fit at $\lambda=100$ produced
+four positive global genes: \textit{ZNF222}, \textit{ZBTB11-AS1},
+\textit{CCDC153}, and \textit{LCN10}. Their total scores were very small
+($3.0\times10^{-6}$, $2.0\times10^{-6}$, $1.7\times10^{-6}$, and
+$1.3\times10^{-6}$, respectively), and the same four genes led each cell-type
+ranking with nearly proportional weights. Ordered g:Profiler returned no
+meaningful enrichment for this sensitivity fit; the top reported terms had
+$p=1.0$ and query size one. These genes are therefore best viewed as numerical
+edge effects near the zero solution, not as AD gene discoveries.
 
-This algorithm converges reliably to the global optimal modular architecture, avoiding both the bilinear optimization trap and LD collinearity artifacts, scaling gracefully to millions of SNPs and tens of thousands of genes.
+\section{Discussion}
+
+The full chromosome-held-out lambda selection answered the main modeling
+question: the selected penalty lies on a broad null plateau, so the current AD
+analysis does not identify robust global or cell-type-specific mediated genes.
+The earlier, narrower grids were not wide enough because their selected lambdas
+were upper-boundary values. Extending the grid to $10^5$ showed that increasing
+regularization improves held-out prediction until the mediated component is
+removed entirely.
+
+This result does not rule out mediated AD architecture. It shows that this
+particular combination of top eQTL annotations, UK Biobank LD, WOLS weighting,
+and nuclear-norm penalty does not improve chromosome-held-out prediction over
+the residual LD-score component. Natural next checks are alternative annotation
+scalings, richer SNP-to-gene annotations than one top eQTL per gene and cell
+type, calibrated LDSC-style regression weights, and validation against known AD
+loci before interpreting any weaker-penalty gene rankings.
 
 \end{document}

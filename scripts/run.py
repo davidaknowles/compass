@@ -176,7 +176,11 @@ def main() -> None:
     parser.add_argument("--annotation-value", default="z2", choices=["z2", "abs_z", "beta2", "neglog10p"])
     parser.add_argument("--no-intercept", action="store_true")
     parser.add_argument("--n-samples", type=float, default=None)
-    parser.add_argument("--lambdas", type=_parse_lambdas, default=_parse_lambdas("1e-1,3e-2,1e-2,3e-3,1e-3,3e-4,1e-4,3e-5,1e-5"))
+    parser.add_argument(
+        "--lambdas",
+        type=_parse_lambdas,
+        default=_parse_lambdas("1e3,3e2,1e2,3e1,1e1,3,1,3e-1,1e-1,3e-2,1e-2,3e-3,1e-3,3e-4,1e-4"),
+    )
     parser.add_argument("--max-iter", type=int, default=500)
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--tol", type=float, default=1e-6)

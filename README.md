@@ -127,12 +127,24 @@ fit = fit_nuclear_norm_path(
     dataset,
     n_genes=len(ann.genes),
     n_mechanisms=len(ann.mechanisms),
-    lambdas=[1e-1, 3e-2, 1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 3e-5, 1e-5],
+    lambdas=[1e3, 3e2, 1e2, 3e1, 1e1, 3, 1, 3e-1, 1e-1, 3e-2, 1e-2, 3e-3, 1e-3, 3e-4, 1e-4],
     cv=True,
     max_iter=200,
     lr=1e-6,
     device="cpu",
 )
+```
+
+By default `scripts/run.py` chooses the nuclear-norm penalty by full
+leave-one-chromosome cross-validation, then refits on all chromosomes at the
+selected lambda. The `--no-cv` flag is available only for debugging.
+
+Run ordered gene-set enrichment on a completed fit:
+
+```bash
+python scripts/run_gsea.py \
+  --b-tsv ~/knowles_lab/data/compass/results/<run-name>.B.tsv \
+  --out-dir ~/knowles_lab/data/compass/results/<run-name>.gsea
 ```
 
 Compare precomputed `T = R2 @ A` against the factorized representation:
