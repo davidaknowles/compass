@@ -14,7 +14,7 @@ import pandas as pd
 import scipy.sparse as sp
 
 from compass.data import load_abc_annotations, load_gwas_sumstats, load_top_assoc_annotations, make_training_table
-from compass.ld import annotation_triples_to_csr, build_ukbb_ld_r2
+from compass.ld import annotation_triples_to_csr, build_ukbb_ld_r2, filter_variants_to_ukbb_ld
 from compass.model import CompassDataset, fit_nuclear_norm_path
 
 
@@ -23,7 +23,10 @@ DEFAULT_ABC_NAME = "AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz
 DEFAULT_ABC_CELL_TYPES = (
     "astrocyte-ENCODE,"
     "bipolar_neuron_from_iPSC-ENCODE,"
-    "H1_Derived_Neuronal_Progenitor_Cultured_Cells-Roadmap"
+    "H1_Derived_Neuronal_Progenitor_Cultured_Cells-Roadmap,"
+    "CD14-positive_monocyte-ENCODE,"
+    "CD14-positive_monocytes-Roadmap,"
+    "THP-1_macrophage-VanBortle2017"
 )
 
 
@@ -63,7 +66,7 @@ def _cache_key(args, gwas_path: Path) -> str:
         else:
             cell_types = hashlib.sha1(args.abc_cell_types.encode("utf-8")).hexdigest()[:12]
         source = (
-            f"abc.{args.abc_score_column}.min{args.abc_min_score:g}."
+            f"abc.allrows.{args.abc_score_column}.min{args.abc_min_score:g}."
             f"folds{args.cre_folds}.gap{args.cre_ld_gap}.{cell_types}"
         )
     else:
@@ -270,17 +273,32 @@ def main() -> None:
                     annotation_value=args.annotation_value,
                     add_intercept=not args.no_intercept,
                 )
+        if args.annotation_source == "abc":
+            with _timed(f"filter annotations to UKBB LD panel with {args.ld_jobs} jobs"):
+                ann_variants = filter_variants_to_ukbb_ld(
+                    ann.variants,
+                    str(ld_dir),
+                    n_jobs=args.ld_jobs,
+                    progress_every=25,
+                )
+        else:
+            ann_variants = ann.variants
         with _timed("align GWAS"):
-            training = make_training_table(ann.variants, gwas)
+            training = make_training_table(ann_variants, gwas)
             training = training.drop_duplicates("variant_idx").sort_values("variant_idx").reset_index(drop=True)
             if training.empty:
                 raise ValueError("No annotation variants aligned to GWAS summary statistics")
 
-        old_variant_idx = training["variant_idx"].to_numpy(np.int64)
-        variants = ann.variants.iloc[old_variant_idx].copy().reset_index(drop=True)
+        filtered_variant_idx = training["variant_idx"].to_numpy(np.int64)
+        variants = ann_variants.iloc[filtered_variant_idx].copy().reset_index(drop=True)
+        source_variant_idx = (
+            variants["source_variant_idx"].to_numpy(np.int64)
+            if "source_variant_idx" in variants.columns
+            else filtered_variant_idx
+        )
         variants["variant_idx"] = np.arange(variants.shape[0], dtype=np.int64)
         old_to_new = pd.DataFrame(
-            {"variant_idx": old_variant_idx, "new_variant_idx": variants["variant_idx"].to_numpy(np.int64)}
+            {"variant_idx": source_variant_idx, "new_variant_idx": variants["variant_idx"].to_numpy(np.int64)}
         )
         triples = ann.triples.merge(old_to_new, on="variant_idx", how="inner")
         triples = triples.drop(columns=["variant_idx"]).rename(columns={"new_variant_idx": "variant_idx"})

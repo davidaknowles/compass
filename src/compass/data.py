@@ -168,11 +168,12 @@ def load_abc_annotations(
 ) -> AnnotationData:
     """Load public ABC enhancer-gene links as sparse variant-gene annotations.
 
-    Variants are GWAS variants that fall inside an ABC candidate regulatory
-    element (CRE). The annotation value is the ABC score for the CRE-gene link
-    in the corresponding biosample/cell type. CRE cross-validation groups are
-    assigned within each gene after collapsing nearby CREs into coarse
-    LD-distance clusters.
+    By default, variants are all usable autosomal GWAS variants. Variants that
+    fall inside an ABC candidate regulatory element (CRE) receive sparse
+    CRE-gene-context annotations; other variants remain as all-zero rows so LD
+    tagging and residual LD-score regression still use the genome-wide row set.
+    CRE cross-validation groups are assigned within each gene after collapsing
+    nearby CREs into coarse LD-distance clusters.
     """
 
     abc_path = Path(abc_path).expanduser()
@@ -199,20 +200,11 @@ def load_abc_annotations(
     gwas_variants = gwas_variants.drop_duplicates("variant_id").sort_values(["chrom", "pos", "variant_id"])
 
     chrom_lookup: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-    gwas_records: dict[str, dict] = {}
-    variant_rows: dict[str, dict] = {}
     for chrom, group in gwas_variants.groupby("chrom", sort=False):
         ids = group["variant_id"].astype(str).to_numpy()
         positions = group["pos"].to_numpy(np.int64)
         order = np.argsort(positions, kind="mergesort")
         chrom_lookup[int(chrom)] = (positions[order], ids[order])
-    for row in gwas_variants[["variant_id", "chrom", "pos", "MarkerID"]].itertuples(index=False):
-        gwas_records[str(row.variant_id)] = {
-            "variant_id": str(row.variant_id),
-            "chrom": int(row.chrom),
-            "pos": int(row.pos),
-            "MarkerID": str(row.MarkerID),
-        }
 
     gene_to_idx: dict[str, int] = {}
     mechanism_to_idx: dict[str, int] = {}
@@ -269,10 +261,6 @@ def load_abc_annotations(
                     (str(variant_id), gene_idx, mechanism_to_idx["intercept"], 1.0, chrom * 10_000_000 + cluster)
                     for variant_id in variant_ids[lo:hi]
             )
-            for variant_id in variant_ids[lo:hi]:
-                variant_id = str(variant_id)
-                if variant_id not in variant_rows:
-                    variant_rows[variant_id] = gwas_records[variant_id]
 
     if not raw_records:
         raise ValueError(f"No ABC CREs in {abc_path} overlapped GWAS variants")
@@ -281,7 +269,8 @@ def load_abc_annotations(
         for offset, (chrom, cluster) in enumerate(sorted(clusters)):
             cluster_fold[(gene_idx, chrom * 10_000_000 + cluster)] = offset % n_folds
 
-    variants = pd.DataFrame(variant_rows.values()).sort_values(["chrom", "pos", "variant_id"]).reset_index(drop=True)
+    variants = gwas_variants[["variant_id", "chrom", "pos", "MarkerID"]].copy()
+    variants = variants.sort_values(["chrom", "pos", "variant_id"]).reset_index(drop=True)
     variants["variant_idx"] = np.arange(variants.shape[0], dtype=np.int64)
     variant_to_idx = dict(zip(variants["variant_id"].astype(str), variants["variant_idx"]))
 

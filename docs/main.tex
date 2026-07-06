@@ -69,12 +69,21 @@ gene promoter, and notes that predictions are same-chromosome CRE-gene links.
 For Alzheimer disease (AD), the default run uses the brain-labelled biosamples
 available in this table: \texttt{astrocyte-ENCODE},
 \texttt{bipolar\_neuron\_from\_iPSC-ENCODE}, and
-\texttt{H1\_Derived\_Neuronal\_Progenitor\_Cultured\_Cells-Roadmap}. The full
-131-biosample table is downloaded and can be selected by passing
-\texttt{--abc-cell-types all}. The implementation reads the ABC table in chunks,
-intersects each CRE interval with GWAS variants, and emits sparse
-variant-gene-context triples whose values are ABC scores. Nearby CREs for the
-same gene are collapsed into coarse LD-distance clusters before fold assignment.
+\texttt{H1\_Derived\_Neuronal\_Progenitor\_Cultured\_Cells-Roadmap}. Because the
+public table does not contain a microglia biosample, the default also includes
+myeloid proxy contexts: \texttt{CD14-positive\_monocyte-ENCODE},
+\texttt{CD14-positive\_monocytes-Roadmap}, and
+\texttt{THP-1\_macrophage-VanBortle2017}. The full 131-biosample table is
+downloaded and can be selected by passing \texttt{--abc-cell-types all}.
+
+The implementation reads the ABC table in chunks, intersects each CRE interval
+with GWAS variants, and emits sparse variant-gene-context triples whose values
+are ABC scores. The regression row universe is not restricted to ABC-overlapping
+variants. Instead, COMPASS uses all GWAS variants represented in the UK Biobank
+LD reference panel. Variants outside ABC CREs have all-zero annotation rows but
+remain in the regression so they contribute to LD tagging and the residual
+non-ABC-mediated LD-score term. Nearby CREs for the same gene are collapsed into
+coarse LD-distance clusters before fold assignment.
 
 \section{Why chromosome-heldout CV was removed}
 
@@ -112,10 +121,12 @@ The repository now downloads the public ABC table into
 \texttt{raw/abc/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz}
 and uses ABC annotations by default in \texttt{scripts/run.py}. Dataset caches
 store CRE fold labels alongside GWAS statistics, chromosome labels, and sample
-sizes. The previous leave-one-chromosome CV code path has been removed from the
-fitting path; requesting CV now requires CRE fold labels in the dataset. The
-older top-eQTL annotation loader remains available for debugging, but it should
-be run with \texttt{--no-cv} unless a valid CRE fold structure is added.
+sizes. The row set is filtered to variants present in the UK Biobank LD
+metadata, and non-CRE rows are retained with zero annotations. The previous
+leave-one-chromosome CV code path has been removed from the fitting path;
+requesting CV now requires CRE fold labels in the dataset. The older top-eQTL
+annotation loader remains available for debugging, but it should be run with
+\texttt{--no-cv} unless a valid CRE fold structure is added.
 
 \section{Next analysis}
 

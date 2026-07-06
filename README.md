@@ -78,10 +78,12 @@ python scripts/run.py
 ```
 
 The default annotation source is ABC CRE-to-gene predictions. For AD, the
-default ABC contexts are the brain-labelled biosamples in the public table:
-`astrocyte-ENCODE`, `bipolar_neuron_from_iPSC-ENCODE`, and
-`H1_Derived_Neuronal_Progenitor_Cultured_Cells-Roadmap`. Use all 131 ABC
-biosamples with:
+default ABC contexts include the brain-labelled biosamples in the public table
+plus myeloid proxy contexts for microglia:
+`astrocyte-ENCODE`, `bipolar_neuron_from_iPSC-ENCODE`,
+`H1_Derived_Neuronal_Progenitor_Cultured_Cells-Roadmap`,
+`CD14-positive_monocyte-ENCODE`, `CD14-positive_monocytes-Roadmap`, and
+`THP-1_macrophage-VanBortle2017`. Use all 131 ABC biosamples with:
 
 ```bash
 python scripts/run.py --abc-cell-types all
@@ -154,6 +156,10 @@ cross-validation. Different LD-separated CRE groups for the same gene are placed
 in different folds where possible. Whole-chromosome CV was removed because it
 holds out mostly unseen genes and is invalid for selecting gene-level penalties.
 The `--no-cv` flag is available only for debugging.
+
+ABC runs use all GWAS variants represented in the UKBB LD reference as regression
+rows. Variants that do not overlap an ABC CRE have all-zero annotation rows but
+remain in the model for LD tagging and residual LD-score estimation.
 
 Run ordered gene-set enrichment on a completed fit:
 

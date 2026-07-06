@@ -154,6 +154,77 @@ def _process_ukbb_ld_block(args):
     )
 
 
+def _matched_ukbb_ld_variants_for_block(args):
+    chrom, start, end, stem, block_variants, ld_dir = args
+    stem_path = Path(pd.io.common.stringify_path(ld_dir)) / stem
+    if not stem_path.with_suffix(".gz").exists():
+        return np.array([], dtype=np.int64)
+    meta = read_ukbb_ld_metadata(ld_dir, stem)
+    by_variant_id = dict(zip(block_variants["variant_id"], block_variants["variant_idx"]))
+    marker = block_variants.get("MarkerID")
+    by_marker = {} if marker is None else dict(zip(marker.astype(str), block_variants["variant_idx"]))
+    meta["target_variant_idx"] = meta["SNP"].astype(str).map(by_marker)
+    missing_snp_match = meta["target_variant_idx"].isna()
+    meta.loc[missing_snp_match, "target_variant_idx"] = meta.loc[missing_snp_match, "variant_id"].map(by_variant_id)
+    hit = meta.dropna(subset=["target_variant_idx"]).drop_duplicates("target_variant_idx")
+    return hit["target_variant_idx"].to_numpy(np.int64)
+
+
+def filter_variants_to_ukbb_ld(
+    variants: pd.DataFrame,
+    ld_dir: str,
+    chromosomes: list[int] | None = None,
+    n_jobs: int = 1,
+    progress_every: int = 0,
+) -> pd.DataFrame:
+    """Return variants represented in the UKBB LD metadata.
+
+    Matching follows the same SNP-ID-first, chromosome-position-second logic as
+    LD matrix assembly. The output preserves the input columns and resets
+    ``variant_idx`` to dense row indices.
+    """
+
+    variants = variants.copy()
+    variants["chrom"] = variants["chrom"].astype(np.int64)
+    variants["pos"] = variants["pos"].astype(np.int64)
+    if "variant_id" not in variants:
+        variants["variant_id"] = "chr" + variants["chrom"].astype(str) + ":" + variants["pos"].astype(str)
+    if "variant_idx" not in variants:
+        variants["variant_idx"] = np.arange(variants.shape[0], dtype=np.int64)
+
+    tasks = []
+    for chrom, start, end, stem in ukbb_ld_block_stems(chromosomes):
+        in_block = variants["chrom"].eq(chrom) & variants["pos"].ge(start) & variants["pos"].lt(end)
+        block_variants = variants.loc[in_block]
+        if not block_variants.empty:
+            tasks.append((chrom, start, end, stem, block_variants.copy(), ld_dir))
+
+    if n_jobs > 1 and len(tasks) > 1:
+        matched_parts = []
+        with ThreadPoolExecutor(max_workers=n_jobs) as pool:
+            futures = [pool.submit(_matched_ukbb_ld_variants_for_block, task) for task in tasks]
+            for i, future in enumerate(as_completed(futures), start=1):
+                matched_parts.append(future.result())
+                if progress_every and (i % progress_every == 0 or i == len(futures)):
+                    print(f"[setup] matched LD panel blocks {i}/{len(futures)}", flush=True)
+    else:
+        matched_parts = []
+        for i, task in enumerate(tasks, start=1):
+            matched_parts.append(_matched_ukbb_ld_variants_for_block(task))
+            if progress_every and (i % progress_every == 0 or i == len(tasks)):
+                print(f"[setup] matched LD panel blocks {i}/{len(tasks)}", flush=True)
+
+    if matched_parts:
+        matched_idx = np.unique(np.concatenate([part for part in matched_parts if part.size]))
+    else:
+        matched_idx = np.array([], dtype=np.int64)
+    out = variants[variants["variant_idx"].isin(matched_idx)].copy()
+    out["source_variant_idx"] = out["variant_idx"].to_numpy(np.int64)
+    out = out.sort_values(["chrom", "pos", "variant_id"]).reset_index(drop=True)
+    out["variant_idx"] = np.arange(out.shape[0], dtype=np.int64)
+    return out
+
+
 def build_ukbb_ld_r2(
     variants: pd.DataFrame,
     ld_dir: str,

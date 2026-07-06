@@ -85,15 +85,31 @@
   `astrocyte-ENCODE`,
   `bipolar_neuron_from_iPSC-ENCODE`,
   `H1_Derived_Neuronal_Progenitor_Cultured_Cells-Roadmap`.
-- These are now the default `--abc-cell-types` for AD.
+- The public table has no obvious microglia biosample. Added myeloid proxy contexts:
+  `CD14-positive_monocyte-ENCODE`,
+  `CD14-positive_monocytes-Roadmap`,
+  `THP-1_macrophage-VanBortle2017`.
+- These six contexts are now the default `--abc-cell-types` for AD.
 - Passing `--abc-cell-types all` uses all 131 public ABC biosamples.
 
-### Setup test
+### All-row LD correction
 
-- Completed a setup-only run for the three brain-labelled ABC biosamples.
+- The first ABC pilot only modeled variants overlapping selected ABC CREs.
+- That design is invalid for LD accounting because non-CRE SNPs that tag CRE SNPs through LD are absent from the regression rows.
+- Corrected design:
+  all GWAS variants represented in the UKBB LD metadata are model rows;
+  variants outside selected ABC CREs have all-zero annotation rows;
+  CRE fold labels are used only to define validation rows, while ambiguous or non-CRE rows can remain in training/background.
+- Added `filter_variants_to_ukbb_ld` so the all-row universe is the GWAS/UKBB-LD intersection, not all 13.37M imputed GWAS rows.
+- The previous result `compass-abc-brain-crecv` is an annotated-only pilot and should not be interpreted as a final model fit.
+
+### Obsolete annotated-only setup test
+
+- Completed a setup-only run for the three brain-labelled ABC biosamples before correcting the row universe.
 - Cached GWAS load took about 11 seconds.
 - ABC overlap construction took about 134 seconds.
 - GWAS alignment took about 3 seconds and annotation matrix construction took about 0.02 seconds.
 - LD assembly over 910 blocks took about 1933 seconds with 8 jobs.
 - Final cached ABC design: 171,788 variants, 67,196 gene-context parameters, 1,291,460 annotation nonzeros, and 40,455,388 LD nonzeros.
+- This cache is annotated-only and obsolete for inference.
 - A small synthetic smoke test exercised `fit_nuclear_norm_path` with `cv_method=cre_ld_group`; it produced fold scores for folds `[0, 1]` and selected among the provided lambdas.
