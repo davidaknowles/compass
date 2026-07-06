@@ -113,6 +113,15 @@
 - `--model-dtype float32|float16` controls non-LD model tensors for comparison; LD remains fp16 in both cases.
 - A synthetic two-chromosome smoke test ran both `model_dtype=float32` and `model_dtype=float16`; both completed CRE-group CV and reported `ld_dtype=float16`.
 
+### Full all-row setup and fit status
+
+- Full all-row ABC/UKBB setup job `18707724` completed and wrote the dataset cache.
+- Cached design summary: 12,362,312 variants, 128,772 gene-context parameters, 1,818,567 annotation nonzeros, and 10,866,690,906 chromosome-level `R2` nonzeros.
+- Setup timing: annotations about 195 seconds, UKBB panel filtering about 244 seconds, chromosome LD construction about 3006 seconds, and cache write about 1863 seconds.
+- The dependent fp32 and fp16 model fit jobs failed with CUDA OOM while coalescing all chromosome LD tensors on GPU.
+- The next fit implementation should keep LD cached on disk/CPU and move one chromosome block to GPU at a time during each objective pass.
+- Removed the obsolete `--use-precomputed` path and the precomputed-vs-factorized benchmark because LD should always be applied as fp16 sparse `R2` blocks.
+
 ### Obsolete annotated-only setup test
 
 - Completed a setup-only run for the three brain-labelled ABC biosamples before correcting the row universe.

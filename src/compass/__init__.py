@@ -9,7 +9,6 @@ _MODEL_EXPORTS = {
     "fit_nuclear_norm_path",
     "fit_rank1_path",
     "predict_factorized",
-    "predict_precomputed",
 }
 
 __all__ = [
@@ -23,7 +22,6 @@ __all__ = [
     "load_top_assoc_annotations",
     "make_training_table",
     "predict_factorized",
-    "predict_precomputed",
 ]
 
 

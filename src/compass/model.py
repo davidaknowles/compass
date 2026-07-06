@@ -86,18 +86,6 @@ def predict_factorized(
     return 1.0 + n_samples * (smoothed + tau * ld_score)
 
 
-def predict_precomputed(
-    B: torch.Tensor,
-    tau_raw: torch.Tensor,
-    T_t: torch.Tensor,
-    ld_score: torch.Tensor,
-    n_samples: float | torch.Tensor,
-) -> torch.Tensor:
-    smoothed = torch.sparse.mm(T_t, _flatten_B(B).unsqueeze(1)).squeeze(1)
-    tau = torch.nn.functional.softplus(tau_raw)
-    return 1.0 + n_samples * (smoothed + tau * ld_score)
-
-
 def _iter_ld_blocks(dataset: CompassDataset):
     if dataset.ld_blocks is not None:
         yield from dataset.ld_blocks
@@ -186,7 +174,6 @@ def fit_nuclear_norm(
     lr: float = 1e-2,
     max_iter: int = 500,
     tol: float = 1e-6,
-    use_precomputed: bool = True,
     device: str = "cpu",
     svd_method: str = "auto",
     svd_rank: int | None = None,
@@ -197,8 +184,6 @@ def fit_nuclear_norm(
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit the convex non-negative nuclear-norm COMPASS relaxation."""
 
-    if use_precomputed:
-        raise ValueError("use_precomputed is disabled: LD must be applied as torch sparse fp16 blocks")
     train_dtype = _torch_dtype(model_dtype)
     A = dataset.A.astype(np.float32)
     block_tensors = []
@@ -206,7 +191,6 @@ def fit_nuclear_norm(
         rows = np.asarray(block.rows, dtype=np.int64)
         A_block = A[rows]
         R2_block = block.R2.astype(np.float32)
-        T_block = (R2_block @ A_block).tocsr() if use_precomputed else None
         chisq_block = torch.as_tensor(dataset.chisq[rows], dtype=torch.float32, device=device)
         weight_block = _weights(
             chisq_block,
@@ -220,14 +204,12 @@ def fit_nuclear_norm(
         block_tensors.append(
             {
                 "rows": rows,
-                "A_t": None if use_precomputed else scipy_to_torch_sparse(A_block, device=device, dtype=train_dtype),
-                "R2_t": None if use_precomputed else scipy_to_torch_sparse(R2_block, device=device, dtype=torch.float16),
-                "T_t": scipy_to_torch_sparse(T_block, device=device) if use_precomputed else None,
+                "A_t": scipy_to_torch_sparse(A_block, device=device, dtype=train_dtype),
+                "R2_t": scipy_to_torch_sparse(R2_block, device=device, dtype=torch.float16),
                 "chisq": chisq_block,
                 "weight": weight_block,
                 "ld_score": torch.as_tensor(np.asarray(R2_block.sum(axis=1)).ravel(), dtype=torch.float32, device=device),
                 "n_samples": n_samples_block,
-                "T_nnz": None if T_block is None else int(T_block.nnz),
             }
         )
 
@@ -250,17 +232,14 @@ def fit_nuclear_norm(
         loss_num = torch.zeros((), dtype=torch.float32, device=device)
         loss_den = 0
         for block in block_tensors:
-            if use_precomputed:
-                pred = predict_precomputed(B, tau_raw, block["T_t"], block["ld_score"], block["n_samples"])
-            else:
-                pred = predict_factorized(
-                    B,
-                    tau_raw,
-                    block["A_t"],
-                    block["R2_t"],
-                    block["ld_score"],
-                    block["n_samples"],
-                )
+            pred = predict_factorized(
+                B,
+                tau_raw,
+                block["A_t"],
+                block["R2_t"],
+                block["ld_score"],
+                block["n_samples"],
+            )
             residual = block["chisq"] - pred
             loss_num = loss_num + torch.sum(block["weight"] * residual.square())
             loss_den += int(residual.numel())
@@ -299,8 +278,6 @@ def fit_nuclear_norm(
     metadata = {
         "iterations": len(losses),
         "seconds": perf_counter() - start,
-        "use_precomputed": use_precomputed,
-        "T_nnz": None if not use_precomputed else int(sum(block["T_nnz"] for block in block_tensors)),
         "ld_blocks": len(block_tensors),
         "svd_method": svd_method,
         "svd_rank": svd_rank,
@@ -335,14 +312,11 @@ def fit_rank1_alt(
     max_iter: int = 500,
     tol: float = 1e-6,
     constrain_w_simplex: bool = False,
-    use_precomputed: bool = True,
     device: str = "cpu",
     model_dtype: str = "float32",
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit rank-1 B = s w' with alternating Torch updates for s and w."""
 
-    if use_precomputed:
-        raise ValueError("use_precomputed is disabled: LD must be applied as torch sparse fp16 blocks")
     train_dtype = _torch_dtype(model_dtype)
     A = dataset.A.astype(np.float32)
     block_tensors = []
@@ -350,7 +324,6 @@ def fit_rank1_alt(
         rows = np.asarray(block.rows, dtype=np.int64)
         A_block = A[rows]
         R2_block = block.R2.astype(np.float32)
-        T_block = (R2_block @ A_block).tocsr() if use_precomputed else None
         chisq_block = torch.as_tensor(dataset.chisq[rows], dtype=torch.float32, device=device)
         weight_block = _weights(
             chisq_block,
@@ -363,14 +336,12 @@ def fit_rank1_alt(
         )
         block_tensors.append(
             {
-                "A_t": None if use_precomputed else scipy_to_torch_sparse(A_block, device=device, dtype=train_dtype),
-                "R2_t": None if use_precomputed else scipy_to_torch_sparse(R2_block, device=device, dtype=torch.float16),
-                "T_t": scipy_to_torch_sparse(T_block, device=device) if use_precomputed else None,
+                "A_t": scipy_to_torch_sparse(A_block, device=device, dtype=train_dtype),
+                "R2_t": scipy_to_torch_sparse(R2_block, device=device, dtype=torch.float16),
                 "chisq": chisq_block,
                 "weight": weight_block,
                 "ld_score": torch.as_tensor(np.asarray(R2_block.sum(axis=1)).ravel(), dtype=torch.float32, device=device),
                 "n_samples": n_samples_block,
-                "T_nnz": None if T_block is None else int(T_block.nnz),
             }
         )
 
@@ -400,17 +371,14 @@ def fit_rank1_alt(
         loss_num = torch.zeros((), dtype=torch.float32, device=device)
         loss_den = 0
         for block in block_tensors:
-            if use_precomputed:
-                pred = predict_precomputed(B, tau_raw, block["T_t"], block["ld_score"], block["n_samples"])
-            else:
-                pred = predict_factorized(
-                    B,
-                    tau_raw,
-                    block["A_t"],
-                    block["R2_t"],
-                    block["ld_score"],
-                    block["n_samples"],
-                )
+            pred = predict_factorized(
+                B,
+                tau_raw,
+                block["A_t"],
+                block["R2_t"],
+                block["ld_score"],
+                block["n_samples"],
+            )
             residual = block["chisq"] - pred
             loss_num = loss_num + torch.sum(block["weight"] * residual.square())
             loss_den += int(residual.numel())
@@ -430,9 +398,7 @@ def fit_rank1_alt(
     metadata = {
         "iterations": len(losses),
         "seconds": perf_counter() - start,
-        "use_precomputed": use_precomputed,
         "constrain_w_simplex": constrain_w_simplex,
-        "T_nnz": None if not use_precomputed else int(sum(block["T_nnz"] for block in block_tensors)),
         "ld_blocks": len(block_tensors),
         "model_dtype": model_dtype,
         "ld_dtype": "float16",

@@ -274,7 +274,6 @@ def main() -> None:
     parser.add_argument("--tol", type=float, default=1e-6)
     parser.add_argument("--no-cv", action="store_true")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    parser.add_argument("--use-precomputed", action="store_true")
     parser.add_argument("--model-dtype", default="float32", choices=["float32", "float16"])
     parser.add_argument("--svd-method", default="auto", choices=["auto", "exact", "randomized"])
     parser.add_argument("--svd-rank", type=int, default=None)
@@ -426,7 +425,6 @@ def main() -> None:
             max_iter=args.max_iter,
             tol=args.tol,
             device=device,
-            use_precomputed=args.use_precomputed,
             model_dtype=args.model_dtype,
             svd_method=args.svd_method,
             svd_rank=args.svd_rank,
@@ -458,7 +456,6 @@ def main() -> None:
         "n_mechanisms": len(mechanisms),
         "n_samples_source": n_samples_source,
         "device": device,
-        "use_precomputed": args.use_precomputed,
         "model_dtype": args.model_dtype,
         "ld_dtype": "float16",
         "svd_method": args.svd_method,
