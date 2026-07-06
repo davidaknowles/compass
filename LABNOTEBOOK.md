@@ -103,6 +103,16 @@
 - Added `filter_variants_to_ukbb_ld` so the all-row universe is the GWAS/UKBB-LD intersection, not all 13.37M imputed GWAS rows.
 - The previous result `compass-abc-brain-crecv` is an annotated-only pilot and should not be interpreted as a final model fit.
 
+### LD precision and representation
+
+- Full all-row genome-wide `R2` materialization failed with OOM at 192 GB.
+- Sampled five UKBB LD blocks: `r2 >= 0.01` keeps about 2.95% of stored entries, a useful sparsity increase.
+- LD is now built as chromosome-level sparse blocks with `r2_cutoff=0.01`.
+- LD values are stored in fp16 custom CSR archives and converted to torch sparse fp16 tensors for fitting.
+- SciPy is only used as a construction/cache container because SciPy sparse does not support fp16 arithmetic.
+- `--model-dtype float32|float16` controls non-LD model tensors for comparison; LD remains fp16 in both cases.
+- A synthetic two-chromosome smoke test ran both `model_dtype=float32` and `model_dtype=float16`; both completed CRE-group CV and reported `ld_dtype=float16`.
+
 ### Obsolete annotated-only setup test
 
 - Completed a setup-only run for the three brain-labelled ABC biosamples before correcting the row universe.

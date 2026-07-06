@@ -161,6 +161,14 @@ ABC runs use all GWAS variants represented in the UKBB LD reference as regressio
 rows. Variants that do not overlap an ABC CRE have all-zero annotation rows but
 remain in the model for LD tagging and residual LD-score estimation.
 
+LD is represented as chromosome-level sparse blocks. Values are thresholded at
+`r2 >= 0.01`, stored as fp16, and applied in the fit as torch sparse fp16
+matrices. Non-LD model tensors default to fp32; compare fp16 model tensors with:
+
+```bash
+python scripts/run.py --model-dtype float16
+```
+
 Run ordered gene-set enrichment on a completed fit:
 
 ```bash

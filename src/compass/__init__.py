@@ -5,6 +5,7 @@ from .data import load_abc_annotations, load_gwas_sumstats, load_top_assoc_annot
 _MODEL_EXPORTS = {
     "CompassDataset",
     "FitResult",
+    "LdChromosomeBlock",
     "fit_nuclear_norm_path",
     "fit_rank1_path",
     "predict_factorized",
@@ -14,6 +15,7 @@ _MODEL_EXPORTS = {
 __all__ = [
     "CompassDataset",
     "FitResult",
+    "LdChromosomeBlock",
     "fit_nuclear_norm_path",
     "fit_rank1_path",
     "load_abc_annotations",

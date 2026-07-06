@@ -14,8 +14,8 @@ import pandas as pd
 import scipy.sparse as sp
 
 from compass.data import load_abc_annotations, load_gwas_sumstats, load_top_assoc_annotations, make_training_table
-from compass.ld import annotation_triples_to_csr, build_ukbb_ld_r2, filter_variants_to_ukbb_ld
-from compass.model import CompassDataset, fit_nuclear_norm_path
+from compass.ld import annotation_triples_to_csr, build_ukbb_ld_r2_by_chromosome, filter_variants_to_ukbb_ld
+from compass.model import CompassDataset, LdChromosomeBlock, fit_nuclear_norm_path
 
 
 DEFAULT_DATA_ROOT = Path.home() / "knowles_lab" / "data" / "compass"
@@ -67,7 +67,7 @@ def _cache_key(args, gwas_path: Path) -> str:
             cell_types = hashlib.sha1(args.abc_cell_types.encode("utf-8")).hexdigest()[:12]
         source = (
             f"abc.allrows.{args.abc_score_column}.min{args.abc_min_score:g}."
-            f"folds{args.cre_folds}.gap{args.cre_ld_gap}.{cell_types}"
+            f"folds{args.cre_folds}.gap{args.cre_ld_gap}.r2ge{args.ld_r2_cutoff:g}.chromfp16.{cell_types}"
         )
     else:
         source = f"topassoc.{args.annotation_value}"
@@ -121,6 +121,7 @@ def _cache_paths(cache_dir: Path, key: str) -> dict[str, Path]:
     return {
         "A": prefix.with_suffix(".A.npz"),
         "R2": prefix.with_suffix(".R2.npz"),
+        "R2_dir": Path(f"{prefix}.R2.chroms"),
         "arrays": prefix.with_suffix(".arrays.npz"),
         "genes": prefix.with_suffix(".genes"),
         "mechanisms": prefix.with_suffix(".mechanisms.json"),
@@ -134,9 +135,12 @@ def _dataset_cache_exists(paths: dict[str, Path]) -> bool:
     diagnostics_exists = _frame_path(paths["ld_diagnostics"], ".parquet").exists() or _frame_path(
         paths["ld_diagnostics"], ".pkl"
     ).exists()
+    r2_exists = paths["R2"].exists() or (
+        paths["R2_dir"].exists() and (paths["R2_dir"] / "manifest.json").exists()
+    )
     return (
         paths["A"].exists()
-        and paths["R2"].exists()
+        and r2_exists
         and paths["arrays"].exists()
         and paths["mechanisms"].exists()
         and genes_exists
@@ -147,7 +151,19 @@ def _dataset_cache_exists(paths: dict[str, Path]) -> bool:
 def _load_dataset_cache(paths: dict[str, Path]):
     with _timed("load dataset cache"):
         A = sp.load_npz(paths["A"])
-        R2 = sp.load_npz(paths["R2"])
+        R2 = sp.load_npz(paths["R2"]) if paths["R2"].exists() else None
+        ld_blocks = None
+        if R2 is None:
+            with open(paths["R2_dir"] / "manifest.json", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            ld_blocks = [
+                LdChromosomeBlock(
+                    chrom=int(item["chrom"]),
+                    rows=np.load(paths["R2_dir"] / item["rows"], allow_pickle=False),
+                    R2=_load_csr_npz(paths["R2_dir"] / item["matrix"]),
+                )
+                for item in manifest["blocks"]
+            ]
         arrays = np.load(paths["arrays"], allow_pickle=False)
         genes = _read_frame(paths["genes"])
         ld_diagnostics = _read_frame(paths["ld_diagnostics"])
@@ -155,13 +171,39 @@ def _load_dataset_cache(paths: dict[str, Path]):
             mechanisms = json.load(handle)
     dataset = CompassDataset(
         A=A,
-        R2=R2,
         chisq=arrays["chisq"],
         chrom=arrays["chrom"],
         n_samples=arrays["n_samples"],
+        R2=R2,
+        ld_blocks=ld_blocks,
         cv_groups=arrays["cv_groups"] if "cv_groups" in arrays and np.any(arrays["cv_groups"] >= 0) else None,
     )
     return dataset, genes, mechanisms, ld_diagnostics, str(arrays["n_samples_source"])
+
+
+def _save_csr_npz(path: Path, matrix: sp.csr_matrix, data_dtype=np.float16) -> None:
+    matrix = matrix.tocsr()
+    np.savez_compressed(
+        path,
+        data=matrix.data.astype(data_dtype),
+        indices=matrix.indices,
+        indptr=matrix.indptr,
+        shape=np.asarray(matrix.shape, dtype=np.int64),
+    )
+
+
+def _load_csr_npz(path: Path) -> sp.csr_matrix:
+    if path.name.endswith(".scipy.npz"):
+        return sp.load_npz(path)
+    arrays = np.load(path, allow_pickle=False)
+    return sp.csr_matrix(
+        (
+            arrays["data"].astype(np.float32),
+            arrays["indices"],
+            arrays["indptr"],
+        ),
+        shape=tuple(arrays["shape"]),
+    )
 
 
 def _write_dataset_cache(
@@ -174,7 +216,19 @@ def _write_dataset_cache(
 ) -> None:
     with _timed("write dataset cache"):
         sp.save_npz(paths["A"], dataset.A)
-        sp.save_npz(paths["R2"], dataset.R2)
+        if dataset.ld_blocks is None:
+            sp.save_npz(paths["R2"], dataset.R2)
+        else:
+            paths["R2_dir"].mkdir(parents=True, exist_ok=True)
+            manifest = {"representation": "chromosome", "blocks": []}
+            for block in dataset.ld_blocks:
+                matrix_name = f"chr{block.chrom}.R2.fp16.npz"
+                rows_name = f"chr{block.chrom}.rows.npy"
+                _save_csr_npz(paths["R2_dir"] / matrix_name, block.R2, data_dtype=np.float16)
+                np.save(paths["R2_dir"] / rows_name, np.asarray(block.rows, dtype=np.int64))
+                manifest["blocks"].append({"chrom": int(block.chrom), "matrix": matrix_name, "rows": rows_name})
+            with open(paths["R2_dir"] / "manifest.json", "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle, indent=2, sort_keys=True)
         np.savez_compressed(
             paths["arrays"],
             chisq=dataset.chisq,
@@ -221,11 +275,13 @@ def main() -> None:
     parser.add_argument("--no-cv", action="store_true")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--use-precomputed", action="store_true")
+    parser.add_argument("--model-dtype", default="float32", choices=["float32", "float16"])
     parser.add_argument("--svd-method", default="auto", choices=["auto", "exact", "randomized"])
     parser.add_argument("--svd-rank", type=int, default=None)
     parser.add_argument("--svd-oversamples", type=int, default=5)
     parser.add_argument("--svd-n-iter", type=int, default=2)
     parser.add_argument("--ld-jobs", type=int, default=8)
+    parser.add_argument("--ld-r2-cutoff", type=float, default=0.01)
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--rebuild-cache", action="store_true")
     parser.add_argument("--setup-only", action="store_true")
@@ -310,13 +366,19 @@ def main() -> None:
                 n_genes=ann.genes.shape[0],
                 n_mechanisms=len(ann.mechanisms),
             )
-        with _timed(f"build UKBB LD R2 with {args.ld_jobs} jobs"):
-            R2, ld_diagnostics = build_ukbb_ld_r2(
+        with _timed(f"build chromosome UKBB LD R2 with {args.ld_jobs} jobs"):
+            ld_block_dicts, ld_diagnostics = build_ukbb_ld_r2_by_chromosome(
                 variants,
                 str(ld_dir),
                 n_jobs=args.ld_jobs,
                 progress_every=25,
+                r2_cutoff=args.ld_r2_cutoff,
+                dtype=np.float32,
             )
+            ld_blocks = [
+                LdChromosomeBlock(chrom=int(block["chrom"]), rows=block["rows"], R2=block["R2"])
+                for block in ld_block_dicts
+            ]
 
         if args.n_samples is not None:
             n_samples: float | np.ndarray = float(args.n_samples)
@@ -329,10 +391,10 @@ def main() -> None:
 
         dataset = CompassDataset(
             A=A,
-            R2=R2,
             chisq=training["chisq"].to_numpy(np.float32),
             chrom=variants["chrom"].to_numpy(np.int64),
             n_samples=n_samples,
+            ld_blocks=ld_blocks,
             cv_groups=(
                 variants["cv_group"].to_numpy(np.int64)
                 if "cv_group" in variants.columns and (variants["cv_group"] >= 0).any()
@@ -345,7 +407,8 @@ def main() -> None:
 
     print(
         f"[setup] dataset variants={dataset.n_variants} params={dataset.n_params} "
-        f"A_nnz={dataset.A.nnz} R2_nnz={dataset.R2.nnz}",
+        f"A_nnz={dataset.A.nnz} R2_nnz="
+        f"{dataset.R2.nnz if dataset.R2 is not None else sum(block.R2.nnz for block in dataset.ld_blocks)}",
         flush=True,
     )
     if args.setup_only:
@@ -364,6 +427,7 @@ def main() -> None:
             tol=args.tol,
             device=device,
             use_precomputed=args.use_precomputed,
+            model_dtype=args.model_dtype,
             svd_method=args.svd_method,
             svd_rank=args.svd_rank,
             svd_oversamples=args.svd_oversamples,
@@ -395,9 +459,13 @@ def main() -> None:
         "n_samples_source": n_samples_source,
         "device": device,
         "use_precomputed": args.use_precomputed,
+        "model_dtype": args.model_dtype,
+        "ld_dtype": "float16",
         "svd_method": args.svd_method,
         "svd_rank": args.svd_rank,
         "ld_jobs": args.ld_jobs,
+        "ld_r2_cutoff": args.ld_r2_cutoff,
+        "ld_representation": "chromosome_fp16",
         "cache_key": key,
         "cv": not args.no_cv,
         "annotation_source": args.annotation_source,

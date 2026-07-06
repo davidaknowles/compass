@@ -85,6 +85,13 @@ remain in the regression so they contribute to LD tagging and the residual
 non-ABC-mediated LD-score term. Nearby CREs for the same gene are collapsed into
 coarse LD-distance clusters before fold assignment.
 
+LD is represented as chromosome-level sparse blocks rather than a single
+genome-wide matrix. Raw UK Biobank correlations are converted to $r^2$, entries
+with $r^2<0.01$ are discarded, and the retained LD values are stored and applied
+as half-precision sparse tensors during fitting. Other model tensors default to
+single precision, with a command-line option to compare half-precision model
+tensors against the default while keeping LD half precision in both runs.
+
 \section{Why chromosome-heldout CV was removed}
 
 Leaving out an entire chromosome is not a valid penalty-selection scheme for the

@@ -80,6 +80,8 @@ def load_ukbb_ld_block_r2(
     stem: str,
     local_rows: np.ndarray | None = None,
     unbiased_n: int | None = None,
+    r2_cutoff: float = 0.0,
+    dtype: np.dtype = np.float32,
 ) -> sp.csr_matrix:
     """Load a UKBB LD block as sparse squared correlations.
 
@@ -92,6 +94,9 @@ def load_ukbb_ld_block_r2(
     if local_rows is not None:
         local_rows = np.asarray(local_rows, dtype=np.int64)
         matrix = matrix[local_rows][:, local_rows].tocsr()
+    if r2_cutoff > 0:
+        matrix.data[np.square(matrix.data) < float(r2_cutoff)] = 0.0
+        matrix.eliminate_zeros()
     matrix = (matrix + matrix.T).tocsr()
     matrix.setdiag(1.0)
     matrix.eliminate_zeros()
@@ -101,11 +106,17 @@ def load_ukbb_ld_block_r2(
         matrix.data -= 1 / (unbiased_n - 2)
         matrix.data = np.maximum(matrix.data, 0.0)
         matrix.eliminate_zeros()
+    if r2_cutoff > 0:
+        matrix.data[matrix.data < float(r2_cutoff)] = 0.0
+        matrix.eliminate_zeros()
+        matrix.setdiag(1.0)
+        matrix.eliminate_zeros()
+    matrix.data = matrix.data.astype(dtype, copy=False)
     return matrix
 
 
 def _process_ukbb_ld_block(args):
-    chrom, start, end, stem, block_variants, ld_dir, unbiased_n = args
+    chrom, start, end, stem, block_variants, ld_dir, unbiased_n, r2_cutoff, dtype = args
     diagnostic = {
         "chrom": chrom,
         "region_start": start,
@@ -143,13 +154,20 @@ def _process_ukbb_ld_block(args):
             np.ones(1, dtype=np.float32),
             global_rows,
         )
-    block_r2 = load_ukbb_ld_block_r2(ld_dir, stem, local_rows=local_rows, unbiased_n=unbiased_n)
+    block_r2 = load_ukbb_ld_block_r2(
+        ld_dir,
+        stem,
+        local_rows=local_rows,
+        unbiased_n=unbiased_n,
+        r2_cutoff=r2_cutoff,
+        dtype=dtype,
+    )
     coo = block_r2.tocoo()
     return (
         diagnostic,
         global_rows[coo.row],
         global_rows[coo.col],
-        coo.data.astype(np.float32, copy=False),
+        coo.data.astype(dtype, copy=False),
         global_rows,
     )
 
@@ -231,6 +249,8 @@ def build_ukbb_ld_r2(
     chromosomes: list[int] | None = None,
     add_identity_for_missing: bool = True,
     unbiased_n: int | None = None,
+    r2_cutoff: float = 0.0,
+    dtype: np.dtype = np.float32,
     n_jobs: int = 1,
     progress_every: int = 0,
 ) -> tuple[sp.csr_matrix, pd.DataFrame]:
@@ -261,7 +281,7 @@ def build_ukbb_ld_r2(
         block_variants = variants.loc[in_block]
         if block_variants.empty:
             continue
-        tasks.append((chrom, start, end, stem, block_variants.copy(), ld_dir, unbiased_n))
+        tasks.append((chrom, start, end, stem, block_variants.copy(), ld_dir, unbiased_n, r2_cutoff, dtype))
 
     if n_jobs > 1 and len(tasks) > 1:
         with ThreadPoolExecutor(max_workers=n_jobs) as pool:
@@ -292,7 +312,7 @@ def build_ukbb_ld_r2(
         if missing.size:
             rows.append(missing.astype(np.int64))
             cols.append(missing.astype(np.int64))
-            vals.append(np.ones(missing.size, dtype=np.float32))
+            vals.append(np.ones(missing.size, dtype=dtype))
 
     if rows:
         row = np.concatenate(rows)
@@ -300,14 +320,109 @@ def build_ukbb_ld_r2(
         val = np.concatenate(vals)
     else:
         row = col = np.array([], dtype=np.int64)
-        val = np.array([], dtype=np.float32)
-    r2 = sp.coo_matrix((val, (row, col)), shape=(n, n), dtype=np.float32).tocsr()
+        val = np.array([], dtype=dtype)
+    r2 = sp.coo_matrix((val, (row, col)), shape=(n, n), dtype=dtype).tocsr()
     r2.sum_duplicates()
     diag = r2.diagonal()
     missing_diag = np.flatnonzero(diag == 0)
     if missing_diag.size:
         r2[missing_diag, missing_diag] = 1.0
     return r2, pd.DataFrame(diagnostics)
+
+
+def build_ukbb_ld_r2_by_chromosome(
+    variants: pd.DataFrame,
+    ld_dir: str,
+    chromosomes: list[int] | None = None,
+    add_identity_for_missing: bool = True,
+    unbiased_n: int | None = None,
+    r2_cutoff: float = 0.01,
+    dtype: np.dtype = np.float32,
+    n_jobs: int = 1,
+    progress_every: int = 0,
+) -> tuple[list[dict], pd.DataFrame]:
+    """Assemble thresholded UKBB LD R2 as chromosome-level sparse blocks."""
+
+    variants = variants.copy()
+    variants["chrom"] = variants["chrom"].astype(np.int64)
+    variants["pos"] = variants["pos"].astype(np.int64)
+    if "variant_id" not in variants:
+        variants["variant_id"] = "chr" + variants["chrom"].astype(str) + ":" + variants["pos"].astype(str)
+    if "variant_idx" not in variants:
+        variants["variant_idx"] = np.arange(variants.shape[0], dtype=np.int64)
+
+    chroms = sorted(variants["chrom"].unique().astype(int).tolist()) if chromosomes is None else [int(c) for c in chromosomes]
+    all_blocks: list[dict] = []
+    all_diagnostics: list[pd.DataFrame] = []
+    for chrom in chroms:
+        chrom_variants = variants.loc[variants["chrom"].eq(chrom)].copy()
+        if chrom_variants.empty:
+            continue
+        chrom_rows = chrom_variants["variant_idx"].to_numpy(np.int64)
+        local_lookup = np.full(int(variants["variant_idx"].max()) + 1, -1, dtype=np.int64)
+        local_lookup[chrom_rows] = np.arange(chrom_rows.size, dtype=np.int64)
+        rows: list[np.ndarray] = []
+        cols: list[np.ndarray] = []
+        vals: list[np.ndarray] = []
+        matched = np.zeros(chrom_rows.size, dtype=bool)
+        diagnostics: list[dict] = []
+        tasks = []
+        for block_chrom, start, end, stem in ukbb_ld_block_stems([chrom]):
+            in_block = chrom_variants["pos"].ge(start) & chrom_variants["pos"].lt(end)
+            block_variants = chrom_variants.loc[in_block]
+            if not block_variants.empty:
+                tasks.append((block_chrom, start, end, stem, block_variants.copy(), ld_dir, unbiased_n, r2_cutoff, dtype))
+
+        if n_jobs > 1 and len(tasks) > 1:
+            with ThreadPoolExecutor(max_workers=n_jobs) as pool:
+                futures = [pool.submit(_process_ukbb_ld_block, task) for task in tasks]
+                results = []
+                for i, future in enumerate(as_completed(futures), start=1):
+                    results.append(future.result())
+                    if progress_every and (i % progress_every == 0 or i == len(futures)):
+                        print(f"[setup] processed chr{chrom} LD blocks {i}/{len(futures)}", flush=True)
+        else:
+            results = []
+            for i, task in enumerate(tasks, start=1):
+                results.append(_process_ukbb_ld_block(task))
+                if progress_every and (i % progress_every == 0 or i == len(tasks)):
+                    print(f"[setup] processed chr{chrom} LD blocks {i}/{len(tasks)}", flush=True)
+
+        for diagnostic, row, col, val, matched_idx in results:
+            diagnostics.append(diagnostic)
+            if row is not None and col is not None and val is not None:
+                rows.append(local_lookup[row])
+                cols.append(local_lookup[col])
+                vals.append(val.astype(dtype, copy=False))
+            if matched_idx.size:
+                matched_local = local_lookup[matched_idx]
+                matched_local = matched_local[matched_local >= 0]
+                matched[matched_local] = True
+
+        if add_identity_for_missing:
+            missing = np.flatnonzero(~matched)
+            if missing.size:
+                rows.append(missing.astype(np.int64))
+                cols.append(missing.astype(np.int64))
+                vals.append(np.ones(missing.size, dtype=dtype))
+
+        if rows:
+            row = np.concatenate(rows)
+            col = np.concatenate(cols)
+            val = np.concatenate(vals)
+        else:
+            row = col = np.array([], dtype=np.int64)
+            val = np.array([], dtype=dtype)
+        r2 = sp.coo_matrix((val, (row, col)), shape=(chrom_rows.size, chrom_rows.size), dtype=dtype).tocsr()
+        r2.sum_duplicates()
+        diag = r2.diagonal()
+        missing_diag = np.flatnonzero(diag == 0)
+        if missing_diag.size:
+            r2[missing_diag, missing_diag] = np.asarray(1.0, dtype=dtype)
+        all_blocks.append({"chrom": chrom, "rows": chrom_rows, "R2": r2})
+        all_diagnostics.append(pd.DataFrame(diagnostics))
+    diagnostics_df = pd.concat(all_diagnostics, ignore_index=True) if all_diagnostics else pd.DataFrame()
+    return all_blocks, diagnostics_df
 
 
 def annotation_triples_to_csr(triples: pd.DataFrame, n_variants: int, n_genes: int, n_mechanisms: int) -> sp.csr_matrix:
@@ -322,14 +437,16 @@ def annotation_triples_to_csr(triples: pd.DataFrame, n_variants: int, n_genes: i
     return sp.coo_matrix((val, (row, col)), shape=(n_variants, n_genes * n_mechanisms)).tocsr()
 
 
-def scipy_to_torch_sparse(matrix: sp.spmatrix, device: str = "cpu"):
+def scipy_to_torch_sparse(matrix: sp.spmatrix, device: str = "cpu", dtype=None):
     import torch
 
+    if dtype is None:
+        dtype = torch.float32
     coo = matrix.tocoo()
     indices = np.vstack([coo.row, coo.col])
     return torch.sparse_coo_tensor(
         torch.as_tensor(indices, dtype=torch.long, device=device),
-        torch.as_tensor(coo.data, dtype=torch.float32, device=device),
+        torch.as_tensor(coo.data, dtype=dtype, device=device),
         size=coo.shape,
         device=device,
     ).coalesce()
