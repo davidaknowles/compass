@@ -122,6 +122,13 @@
 - The next fit implementation should keep LD cached on disk/CPU and move one chromosome block to GPU at a time during each objective pass.
 - Removed the obsolete `--use-precomputed` path and the precomputed-vs-factorized benchmark because LD should always be applied as fp16 sparse `R2` blocks.
 
+### Streaming chromosome LD during fitting
+
+- Updated the Torch fit loops so chromosome LD is no longer preloaded onto GPU for all chromosomes.
+- Each objective pass now converts only the active chromosome `R2` block to a torch fp16 sparse tensor, evaluates that block, immediately backpropagates its normalized loss contribution, then releases the block graph before moving to the next chromosome.
+- On CUDA, LD conversion uses torch sparse CSR to avoid COO `coalesce()` memory overhead; CPU smoke tests continue to use COO because fp16 CSR matmul is not implemented on CPU in the current Torch build.
+- CRE-fold CV subsetting now stores local chromosome row indices instead of eagerly copying full train/test LD matrices.
+
 ### Obsolete annotated-only setup test
 
 - Completed a setup-only run for the three brain-labelled ABC biosamples before correcting the row universe.

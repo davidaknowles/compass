@@ -437,16 +437,27 @@ def annotation_triples_to_csr(triples: pd.DataFrame, n_variants: int, n_genes: i
     return sp.coo_matrix((val, (row, col)), shape=(n_variants, n_genes * n_mechanisms)).tocsr()
 
 
-def scipy_to_torch_sparse(matrix: sp.spmatrix, device: str = "cpu", dtype=None):
+def scipy_to_torch_sparse(matrix: sp.spmatrix, device: str = "cpu", dtype=None, layout: str = "coo"):
     import torch
 
     if dtype is None:
         dtype = torch.float32
-    coo = matrix.tocoo()
-    indices = np.vstack([coo.row, coo.col])
-    return torch.sparse_coo_tensor(
-        torch.as_tensor(indices, dtype=torch.long, device=device),
-        torch.as_tensor(coo.data, dtype=dtype, device=device),
-        size=coo.shape,
-        device=device,
-    ).coalesce()
+    if layout == "csr":
+        csr = matrix.tocsr()
+        return torch.sparse_csr_tensor(
+            torch.as_tensor(csr.indptr, dtype=torch.long, device=device),
+            torch.as_tensor(csr.indices, dtype=torch.long, device=device),
+            torch.as_tensor(csr.data, dtype=dtype, device=device),
+            size=csr.shape,
+            device=device,
+        )
+    if layout == "coo":
+        coo = matrix.tocoo()
+        indices = np.vstack([coo.row, coo.col])
+        return torch.sparse_coo_tensor(
+            torch.as_tensor(indices, dtype=torch.long, device=device),
+            torch.as_tensor(coo.data, dtype=dtype, device=device),
+            size=coo.shape,
+            device=device,
+        ).coalesce()
+    raise ValueError(f"Unknown torch sparse layout: {layout}")

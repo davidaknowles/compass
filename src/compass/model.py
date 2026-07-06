@@ -15,6 +15,7 @@ class LdChromosomeBlock:
     chrom: int
     rows: np.ndarray
     R2: sp.csr_matrix
+    R2_local_rows: np.ndarray | None = None
 
 
 @dataclass
@@ -97,6 +98,97 @@ def _iter_ld_blocks(dataset: CompassDataset):
         rows=np.arange(dataset.n_variants, dtype=np.int64),
         R2=dataset.R2,
     )
+
+
+def _materialize_block_r2(block: LdChromosomeBlock) -> sp.csr_matrix:
+    matrix = block.R2.tocsr()
+    if block.R2_local_rows is None:
+        return matrix
+    local_rows = np.asarray(block.R2_local_rows, dtype=np.int64)
+    return matrix[local_rows][:, local_rows].tocsr()
+
+
+def _ld_torch_layout(device: str) -> str:
+    return "csr" if torch.device(device).type == "cuda" else "coo"
+
+
+def _clear_cuda_cache(device: str) -> None:
+    if torch.device(device).type == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _prepare_fit_blocks(
+    dataset: CompassDataset,
+    device: str,
+    train_dtype: torch.dtype,
+) -> list[dict]:
+    A = dataset.A.astype(np.float32)
+    block_specs = []
+    for block in _iter_ld_blocks(dataset):
+        rows = np.asarray(block.rows, dtype=np.int64)
+        R2_block = _materialize_block_r2(block).astype(np.float32, copy=False)
+        A_block = A[rows]
+        chisq_block = torch.as_tensor(dataset.chisq[rows], dtype=torch.float32, device=device)
+        weight_block = _weights(
+            chisq_block,
+            None if dataset.sample_weight is None else dataset.sample_weight[rows],
+            device,
+        )
+        n_samples_block = _samples_tensor(
+            np.asarray(dataset.n_samples)[rows] if np.ndim(dataset.n_samples) > 0 else dataset.n_samples,
+            device,
+        )
+        block_specs.append(
+            {
+                "chrom": block.chrom,
+                "rows": rows,
+                "A_t": scipy_to_torch_sparse(A_block, device=device, dtype=train_dtype),
+                "R2_cpu": R2_block if block.R2_local_rows is None else None,
+                "R2_source": block,
+                "R2_nnz": int(R2_block.nnz),
+                "chisq": chisq_block,
+                "weight": weight_block,
+                "ld_score": torch.as_tensor(np.asarray(R2_block.sum(axis=1)).ravel(), dtype=torch.float32, device=device),
+                "n_samples": n_samples_block,
+            }
+        )
+        if block.R2_local_rows is not None:
+            del R2_block
+    return block_specs
+
+
+def _block_r2_cpu(block_spec: dict) -> sp.csr_matrix:
+    if block_spec["R2_cpu"] is not None:
+        return block_spec["R2_cpu"]
+    return _materialize_block_r2(block_spec["R2_source"]).astype(np.float32, copy=False)
+
+
+def _backward_data_loss(
+    block_specs: list[dict],
+    B: torch.Tensor,
+    tau_raw: torch.Tensor,
+    device: str,
+    total_den: int,
+) -> float:
+    loss_value = 0.0
+    ld_layout = _ld_torch_layout(device)
+    for block in block_specs:
+        R2_t = scipy_to_torch_sparse(_block_r2_cpu(block), device=device, dtype=torch.float16, layout=ld_layout)
+        pred = predict_factorized(
+            B,
+            tau_raw,
+            block["A_t"],
+            R2_t,
+            block["ld_score"],
+            block["n_samples"],
+        )
+        residual = block["chisq"] - pred
+        loss_block = torch.sum(block["weight"] * residual.square()) / max(total_den, 1)
+        loss_value += float(loss_block.detach().cpu())
+        loss_block.backward()
+        del R2_t, pred, residual, loss_block
+        _clear_cuda_cache(device)
+    return loss_value
 
 
 def _randomized_svd(
@@ -185,33 +277,8 @@ def fit_nuclear_norm(
     """Fit the convex non-negative nuclear-norm COMPASS relaxation."""
 
     train_dtype = _torch_dtype(model_dtype)
-    A = dataset.A.astype(np.float32)
-    block_tensors = []
-    for block in _iter_ld_blocks(dataset):
-        rows = np.asarray(block.rows, dtype=np.int64)
-        A_block = A[rows]
-        R2_block = block.R2.astype(np.float32)
-        chisq_block = torch.as_tensor(dataset.chisq[rows], dtype=torch.float32, device=device)
-        weight_block = _weights(
-            chisq_block,
-            None if dataset.sample_weight is None else dataset.sample_weight[rows],
-            device,
-        )
-        n_samples_block = _samples_tensor(
-            np.asarray(dataset.n_samples)[rows] if np.ndim(dataset.n_samples) > 0 else dataset.n_samples,
-            device,
-        )
-        block_tensors.append(
-            {
-                "rows": rows,
-                "A_t": scipy_to_torch_sparse(A_block, device=device, dtype=train_dtype),
-                "R2_t": scipy_to_torch_sparse(R2_block, device=device, dtype=torch.float16),
-                "chisq": chisq_block,
-                "weight": weight_block,
-                "ld_score": torch.as_tensor(np.asarray(R2_block.sum(axis=1)).ravel(), dtype=torch.float32, device=device),
-                "n_samples": n_samples_block,
-            }
-        )
+    block_specs = _prepare_fit_blocks(dataset, device, train_dtype)
+    total_den = int(sum(block["rows"].size for block in block_specs))
 
     if init_B is None:
         B = torch.zeros((n_genes, n_mechanisms), dtype=train_dtype, device=device, requires_grad=True)
@@ -229,27 +296,11 @@ def fit_nuclear_norm(
             B.grad.zero_()
         if tau_raw.grad is not None:
             tau_raw.grad.zero_()
-        loss_num = torch.zeros((), dtype=torch.float32, device=device)
-        loss_den = 0
-        for block in block_tensors:
-            pred = predict_factorized(
-                B,
-                tau_raw,
-                block["A_t"],
-                block["R2_t"],
-                block["ld_score"],
-                block["n_samples"],
-            )
-            residual = block["chisq"] - pred
-            loss_num = loss_num + torch.sum(block["weight"] * residual.square())
-            loss_den += int(residual.numel())
-        loss = loss_num / max(loss_den, 1)
-        loss_value = float(loss.detach().cpu())
+        loss_value = _backward_data_loss(block_specs, B, tau_raw, device, total_den)
         if np.isfinite(loss_value) and loss_value < best_loss:
             best_loss = loss_value
             best_B = B.detach().clone()
             best_tau_raw = tau_raw.detach().clone()
-        loss.backward()
         with torch.no_grad():
             b_grad = torch.nan_to_num(B.grad, nan=0.0, posinf=0.0, neginf=0.0)
             if grad_clip is not None:
@@ -278,7 +329,9 @@ def fit_nuclear_norm(
     metadata = {
         "iterations": len(losses),
         "seconds": perf_counter() - start,
-        "ld_blocks": len(block_tensors),
+        "ld_blocks": len(block_specs),
+        "ld_gpu_layout": _ld_torch_layout(device),
+        "ld_nnz": int(sum(block["R2_nnz"] for block in block_specs)),
         "svd_method": svd_method,
         "svd_rank": svd_rank,
         "grad_clip": grad_clip,
@@ -318,32 +371,8 @@ def fit_rank1_alt(
     """Fit rank-1 B = s w' with alternating Torch updates for s and w."""
 
     train_dtype = _torch_dtype(model_dtype)
-    A = dataset.A.astype(np.float32)
-    block_tensors = []
-    for block in _iter_ld_blocks(dataset):
-        rows = np.asarray(block.rows, dtype=np.int64)
-        A_block = A[rows]
-        R2_block = block.R2.astype(np.float32)
-        chisq_block = torch.as_tensor(dataset.chisq[rows], dtype=torch.float32, device=device)
-        weight_block = _weights(
-            chisq_block,
-            None if dataset.sample_weight is None else dataset.sample_weight[rows],
-            device,
-        )
-        n_samples_block = _samples_tensor(
-            np.asarray(dataset.n_samples)[rows] if np.ndim(dataset.n_samples) > 0 else dataset.n_samples,
-            device,
-        )
-        block_tensors.append(
-            {
-                "A_t": scipy_to_torch_sparse(A_block, device=device, dtype=train_dtype),
-                "R2_t": scipy_to_torch_sparse(R2_block, device=device, dtype=torch.float16),
-                "chisq": chisq_block,
-                "weight": weight_block,
-                "ld_score": torch.as_tensor(np.asarray(R2_block.sum(axis=1)).ravel(), dtype=torch.float32, device=device),
-                "n_samples": n_samples_block,
-            }
-        )
+    block_specs = _prepare_fit_blocks(dataset, device, train_dtype)
+    total_den = int(sum(block["rows"].size for block in block_specs))
 
     s_raw0 = np.full(n_genes, -8.0, dtype=np.float32) if init_s is None else np.log(np.expm1(np.maximum(init_s, 1e-12)))
     if init_w is None:
@@ -365,27 +394,34 @@ def fit_rank1_alt(
     for it in range(max_iter):
         opt = opt_s if it % 2 == 0 else opt_w
         opt.zero_grad()
-        s = torch.nn.functional.softplus(s_raw)
-        w = _normalize_simplex(w_raw, constrain_w_simplex)
-        B = torch.outer(s, w)
-        loss_num = torch.zeros((), dtype=torch.float32, device=device)
-        loss_den = 0
-        for block in block_tensors:
+        data_loss = 0.0
+        ld_layout = _ld_torch_layout(device)
+        for block in block_specs:
+            s = torch.nn.functional.softplus(s_raw)
+            w = _normalize_simplex(w_raw, constrain_w_simplex)
+            B = torch.outer(s, w)
+            R2_t = scipy_to_torch_sparse(_block_r2_cpu(block), device=device, dtype=torch.float16, layout=ld_layout)
             pred = predict_factorized(
                 B,
                 tau_raw,
                 block["A_t"],
-                block["R2_t"],
+                R2_t,
                 block["ld_score"],
                 block["n_samples"],
             )
             residual = block["chisq"] - pred
-            loss_num = loss_num + torch.sum(block["weight"] * residual.square())
-            loss_den += int(residual.numel())
-        loss = loss_num / max(loss_den, 1) + lambda_value * torch.linalg.norm(B, ord="nuc")
-        loss.backward()
+            loss_block = torch.sum(block["weight"] * residual.square()) / max(total_den, 1)
+            data_loss += float(loss_block.detach().cpu())
+            loss_block.backward()
+            del R2_t, pred, residual, loss_block, B
+            _clear_cuda_cache(device)
+        s = torch.nn.functional.softplus(s_raw)
+        w = _normalize_simplex(w_raw, constrain_w_simplex)
+        B = torch.outer(s, w)
+        reg = lambda_value * torch.linalg.norm(B, ord="nuc")
+        reg.backward()
         opt.step()
-        losses.append(float(loss.detach().cpu()))
+        losses.append(data_loss + float(reg.detach().cpu()))
         with torch.no_grad():
             B_now = torch.outer(torch.nn.functional.softplus(s_raw), _normalize_simplex(w_raw, constrain_w_simplex))
             if last_B is not None:
@@ -399,7 +435,9 @@ def fit_rank1_alt(
         "iterations": len(losses),
         "seconds": perf_counter() - start,
         "constrain_w_simplex": constrain_w_simplex,
-        "ld_blocks": len(block_tensors),
+        "ld_blocks": len(block_specs),
+        "ld_gpu_layout": _ld_torch_layout(device),
+        "ld_nnz": int(sum(block["R2_nnz"] for block in block_specs)),
         "model_dtype": model_dtype,
         "ld_dtype": "float16",
     }
@@ -426,11 +464,16 @@ def _subset_dataset(dataset: CompassDataset, keep: np.ndarray) -> CompassDataset
             if not np.any(local_keep):
                 continue
             new_rows = old_to_new[block.rows[local_keep]]
+            if block.R2_local_rows is None:
+                local_rows = np.flatnonzero(local_keep).astype(np.int64)
+            else:
+                local_rows = np.asarray(block.R2_local_rows, dtype=np.int64)[local_keep]
             ld_blocks.append(
                 LdChromosomeBlock(
                     chrom=block.chrom,
                     rows=new_rows,
-                    R2=block.R2[local_keep][:, local_keep].tocsr(),
+                    R2=block.R2,
+                    R2_local_rows=local_rows,
                 )
             )
     return CompassDataset(
@@ -523,7 +566,7 @@ def _predict_numpy(dataset: CompassDataset, B: np.ndarray, tau: float) -> np.nda
     flat_B = B.reshape(-1)
     for block in _iter_ld_blocks(dataset):
         rows = np.asarray(block.rows, dtype=np.int64)
-        R2 = block.R2.astype(np.float32)
+        R2 = _materialize_block_r2(block).astype(np.float32, copy=False)
         ld_score = np.asarray(R2.sum(axis=1)).ravel()
         smoothed = R2 @ (dataset.A[rows] @ flat_B)
         n_samples = np.asarray(dataset.n_samples)[rows] if np.ndim(dataset.n_samples) > 0 else dataset.n_samples

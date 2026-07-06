@@ -14,6 +14,7 @@ cd /gpfs/commons/home/daknowles/projects/compass
 mkdir -p /gpfs/commons/home/daknowles/knowles_lab/data/compass/logs
 source /gpfs/commons/home/daknowles/venv/torchfix/bin/activate
 export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 python scripts/run.py \
   --data-root /gpfs/commons/home/daknowles/knowles_lab/data/compass \
