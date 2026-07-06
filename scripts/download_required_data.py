@@ -28,6 +28,11 @@ TOP_ASSOC_FILES = [
 ]
 UKBB_LD_PREFIX = "https://broad-alkesgroup-ukbb-ld.s3.amazonaws.com/UKBB_LD"
 UKBB_LD_BUCKET = "https://broad-alkesgroup-ukbb-ld.s3.amazonaws.com"
+ABC_PREDICTIONS_URL = (
+    "https://mitra.stanford.edu/engreitz/oak/public/Nasser2021/"
+    "AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz"
+)
+ABC_PREDICTIONS_NAME = "AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz"
 REGION_LENGTH = 3_000_000
 LD_STEM_RE = re.compile(r"^chr(?P<chrom>\d+)_(?P<start>\d+)_(?P<end>\d+)$")
 GRCH37_AUTOSOME_LENGTHS = {
@@ -146,8 +151,10 @@ def main() -> None:
     parser.add_argument("--top-assoc-dir", default=None)
     parser.add_argument("--ad-out", default=None)
     parser.add_argument("--ld-dir", default=None)
+    parser.add_argument("--abc-out", default=None)
     parser.add_argument("--download-top-assoc", action="store_true")
     parser.add_argument("--download-ad", action="store_true")
+    parser.add_argument("--download-abc", action="store_true")
     parser.add_argument("--download-ld-metadata", action="store_true")
     parser.add_argument("--download-ld-npz", action="store_true")
     parser.add_argument("--chrom", type=int, default=None)
@@ -158,6 +165,7 @@ def main() -> None:
     top_assoc_dir = Path(args.top_assoc_dir).expanduser() if args.top_assoc_dir else data_root / "raw" / "zenodo_top_assoc"
     ad_out = Path(args.ad_out).expanduser() if args.ad_out else data_root / "raw" / "ad_gwas" / "AD_sumstats_Jansenetal_2019sept.txt.gz"
     ld_dir = Path(args.ld_dir).expanduser() if args.ld_dir else data_root / "raw" / "ukbb_ld"
+    abc_out = Path(args.abc_out).expanduser() if args.abc_out else data_root / "raw" / "abc" / ABC_PREDICTIONS_NAME
 
     if args.download_top_assoc:
         for file_name in TOP_ASSOC_FILES:
@@ -166,6 +174,9 @@ def main() -> None:
 
     if args.download_ad:
         download(AD_GWAS_URL, ad_out)
+
+    if args.download_abc:
+        download(ABC_PREDICTIONS_URL, abc_out)
 
     blocks = list(iter_ukbb_ld_blocks(args.chrom))
     print(f"UKBB LD blocks: {len(blocks)}")

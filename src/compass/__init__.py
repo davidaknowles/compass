@@ -1,6 +1,6 @@
 """COMPASS prototype implementation."""
 
-from .data import load_top_assoc_annotations, load_gwas_sumstats, make_training_table
+from .data import load_abc_annotations, load_gwas_sumstats, load_top_assoc_annotations, make_training_table
 
 _MODEL_EXPORTS = {
     "CompassDataset",
@@ -16,6 +16,7 @@ __all__ = [
     "FitResult",
     "fit_nuclear_norm_path",
     "fit_rank1_path",
+    "load_abc_annotations",
     "load_gwas_sumstats",
     "load_top_assoc_annotations",
     "make_training_table",

@@ -29,6 +29,7 @@ Current downloaded files:
 
 ```text
 ~/knowles_lab/data/compass/raw/zenodo_top_assoc/*.tsv.gz
+~/knowles_lab/data/compass/raw/abc/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz
 ~/knowles_lab/data/compass/raw/ad_gwas/AD_sumstats_Jansenetal_2019sept.txt.gz
 ~/knowles_lab/data/compass/raw/ukbb_ld/
 ~/knowles_lab/data/compass/results/
@@ -36,13 +37,15 @@ Current downloaded files:
 
 The AD GWAS file is the updated Jansen et al. 2019 Alzheimer summary statistics
 downloaded from the CNCR/SURF data share. The eQTL top-association files are from
-Zenodo record `15860973`.
+Zenodo record `15860973`. The default annotation source is now public ABC
+enhancer-gene scores from Nasser et al. 2021.
 
 ## Data Sources
 
 The downloader uses these public sources:
 
 - SingleBrain top-association eQTL files: Zenodo record `15860973`, `https://zenodo.org/records/15860973`
+- ABC enhancer-gene predictions in 131 biosamples: Engreitz Lab/Nasser et al. 2021, `https://mitra.stanford.edu/engreitz/oak/public/Nasser2021/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz`
 - Alzheimer GWAS summary statistics: CNCR/SURF share, `https://vu.data.surf.nl/index.php/s/l7aiRr1UEgdoJfZ/download?path=%2F&files=AD_sumstats_Jansenetal_2019sept.txt.gz`
 - UK Biobank LD matrices used by PolyFun: Broad/Alkes S3 prefix, `https://broad-alkesgroup-ukbb-ld.s3.amazonaws.com/UKBB_LD/`
 
@@ -54,6 +57,7 @@ LD `.npz` block and `.gz` metadata sidecar:
 ```bash
 python scripts/download_required_data.py \
   --download-top-assoc \
+  --download-abc \
   --download-ad \
   --download-ld-metadata \
   --download-ld-npz
@@ -71,6 +75,16 @@ Run the default genome-wide workflow:
 
 ```bash
 python scripts/run.py
+```
+
+The default annotation source is ABC CRE-to-gene predictions. For AD, the
+default ABC contexts are the brain-labelled biosamples in the public table:
+`astrocyte-ENCODE`, `bipolar_neuron_from_iPSC-ENCODE`, and
+`H1_Derived_Neuronal_Progenitor_Cultured_Cells-Roadmap`. Use all 131 ABC
+biosamples with:
+
+```bash
+python scripts/run.py --abc-cell-types all
 ```
 
 The run requires known sample sizes. The AD GWAS downloaded above contains
@@ -135,9 +149,11 @@ fit = fit_nuclear_norm_path(
 )
 ```
 
-By default `scripts/run.py` chooses the nuclear-norm penalty by full
-leave-one-chromosome cross-validation, then refits on all chromosomes at the
-selected lambda. The `--no-cv` flag is available only for debugging.
+By default `scripts/run.py` chooses the nuclear-norm penalty by CRE-structured
+cross-validation. Different LD-separated CRE groups for the same gene are placed
+in different folds where possible. Whole-chromosome CV was removed because it
+holds out mostly unseen genes and is invalid for selecting gene-level penalties.
+The `--no-cv` flag is available only for debugging.
 
 Run ordered gene-set enrichment on a completed fit:
 

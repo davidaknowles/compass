@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from contextlib import contextmanager
 from datetime import datetime
@@ -12,12 +13,18 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
-from compass.data import load_gwas_sumstats, load_top_assoc_annotations, make_training_table
+from compass.data import load_abc_annotations, load_gwas_sumstats, load_top_assoc_annotations, make_training_table
 from compass.ld import annotation_triples_to_csr, build_ukbb_ld_r2
 from compass.model import CompassDataset, fit_nuclear_norm_path
 
 
 DEFAULT_DATA_ROOT = Path.home() / "knowles_lab" / "data" / "compass"
+DEFAULT_ABC_NAME = "AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz"
+DEFAULT_ABC_CELL_TYPES = (
+    "astrocyte-ENCODE,"
+    "bipolar_neuron_from_iPSC-ENCODE,"
+    "H1_Derived_Neuronal_Progenitor_Cultured_Cells-Roadmap"
+)
 
 
 def _parse_lambdas(value: str) -> list[float]:
@@ -50,7 +57,18 @@ def _timed(label: str):
 def _cache_key(args, gwas_path: Path) -> str:
     intercept = "intercept" if not args.no_intercept else "nointercept"
     n_samples = "gwas" if args.n_samples is None else f"n{args.n_samples:g}"
-    return f"{args.annotation_value}.{intercept}.{gwas_path.name}.{n_samples}"
+    if args.annotation_source == "abc":
+        if args.abc_cell_types.lower() == "all":
+            cell_types = "all"
+        else:
+            cell_types = hashlib.sha1(args.abc_cell_types.encode("utf-8")).hexdigest()[:12]
+        source = (
+            f"abc.{args.abc_score_column}.min{args.abc_min_score:g}."
+            f"folds{args.cre_folds}.gap{args.cre_ld_gap}.{cell_types}"
+        )
+    else:
+        source = f"topassoc.{args.annotation_value}"
+    return f"{source}.{intercept}.{gwas_path.name}.{n_samples}"
 
 
 def _frame_path(path: Path, extension: str) -> Path:
@@ -138,6 +156,7 @@ def _load_dataset_cache(paths: dict[str, Path]):
         chisq=arrays["chisq"],
         chrom=arrays["chrom"],
         n_samples=arrays["n_samples"],
+        cv_groups=arrays["cv_groups"] if "cv_groups" in arrays and np.any(arrays["cv_groups"] >= 0) else None,
     )
     return dataset, genes, mechanisms, ld_diagnostics, str(arrays["n_samples_source"])
 
@@ -157,6 +176,11 @@ def _write_dataset_cache(
             paths["arrays"],
             chisq=dataset.chisq,
             chrom=dataset.chrom,
+            cv_groups=(
+                np.asarray(dataset.cv_groups, dtype=np.int64)
+                if dataset.cv_groups is not None
+                else np.full(dataset.n_variants, -1, dtype=np.int64)
+            ),
             n_samples=np.asarray(dataset.n_samples, dtype=np.float32),
             n_samples_source=np.asarray(n_samples_source),
         )
@@ -170,6 +194,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run genome-wide COMPASS with UKBB LD.")
     parser.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
     parser.add_argument("--top-assoc-dir", default=None)
+    parser.add_argument("--annotation-source", default="abc", choices=["abc", "top_assoc"])
+    parser.add_argument("--abc-path", default=None)
+    parser.add_argument("--abc-cell-types", default=DEFAULT_ABC_CELL_TYPES)
+    parser.add_argument("--abc-score-column", default="ABC.Score")
+    parser.add_argument("--abc-min-score", type=float, default=0.015)
+    parser.add_argument("--cre-folds", type=int, default=5)
+    parser.add_argument("--cre-ld-gap", type=int, default=1_000_000)
     parser.add_argument("--gwas", default=None)
     parser.add_argument("--ld-dir", default=None)
     parser.add_argument("--out-dir", default=None)
@@ -200,6 +231,7 @@ def main() -> None:
 
     data_root = Path(args.data_root).expanduser()
     top_assoc_dir = Path(args.top_assoc_dir).expanduser() if args.top_assoc_dir else data_root / "raw" / "zenodo_top_assoc"
+    abc_path = Path(args.abc_path).expanduser() if args.abc_path else data_root / "raw" / "abc" / DEFAULT_ABC_NAME
     gwas_path = Path(args.gwas).expanduser() if args.gwas else data_root / "raw" / "ad_gwas" / "AD_sumstats_Jansenetal_2019sept.txt.gz"
     ld_dir = Path(args.ld_dir).expanduser() if args.ld_dir else data_root / "raw" / "ukbb_ld"
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else data_root / "results"
@@ -219,13 +251,25 @@ def main() -> None:
     if not args.rebuild_cache and _dataset_cache_exists(paths):
         dataset, genes, mechanisms, ld_diagnostics, n_samples_source = _load_dataset_cache(paths)
     else:
-        with _timed("load annotations"):
-            ann = load_top_assoc_annotations(
-                top_assoc_dir,
-                annotation_value=args.annotation_value,
-                add_intercept=not args.no_intercept,
-            )
         gwas = _load_gwas_cached(gwas_path, cache_dir, args.rebuild_cache)
+        with _timed("load annotations"):
+            if args.annotation_source == "abc":
+                ann = load_abc_annotations(
+                    abc_path,
+                    gwas,
+                    score_column=args.abc_score_column,
+                    min_score=args.abc_min_score,
+                    cell_types=args.abc_cell_types,
+                    add_intercept=not args.no_intercept,
+                    n_folds=args.cre_folds,
+                    ld_gap=args.cre_ld_gap,
+                )
+            else:
+                ann = load_top_assoc_annotations(
+                    top_assoc_dir,
+                    annotation_value=args.annotation_value,
+                    add_intercept=not args.no_intercept,
+                )
         with _timed("align GWAS"):
             training = make_training_table(ann.variants, gwas)
             training = training.drop_duplicates("variant_idx").sort_values("variant_idx").reset_index(drop=True)
@@ -271,6 +315,11 @@ def main() -> None:
             chisq=training["chisq"].to_numpy(np.float32),
             chrom=variants["chrom"].to_numpy(np.int64),
             n_samples=n_samples,
+            cv_groups=(
+                variants["cv_group"].to_numpy(np.int64)
+                if "cv_group" in variants.columns and (variants["cv_group"] >= 0).any()
+                else None
+            ),
         )
         genes = ann.genes
         mechanisms = ann.mechanisms
@@ -333,6 +382,13 @@ def main() -> None:
         "ld_jobs": args.ld_jobs,
         "cache_key": key,
         "cv": not args.no_cv,
+        "annotation_source": args.annotation_source,
+        "abc_path": str(abc_path) if args.annotation_source == "abc" else None,
+        "abc_cell_types": args.abc_cell_types if args.annotation_source == "abc" else None,
+        "abc_score_column": args.abc_score_column if args.annotation_source == "abc" else None,
+        "abc_min_score": args.abc_min_score if args.annotation_source == "abc" else None,
+        "cre_folds": args.cre_folds if args.annotation_source == "abc" else None,
+        "cre_ld_gap": args.cre_ld_gap if args.annotation_source == "abc" else None,
     }
     with open(f"{prefix}.metadata.json", "w", encoding="utf-8") as handle:
         json.dump(_json_safe(metadata), handle, indent=2, sort_keys=True)

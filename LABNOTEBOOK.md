@@ -52,3 +52,48 @@
 - The final grid brackets the optimum by reaching a broad null mediated plateau.
 - Under the current top-eQTL annotation design, weighting, and objective, chromosome-held-out prediction favors removing the mediated component.
 - The current analysis therefore does not support robust global or cell-type-specific AD gene discoveries.
+
+## 2026-07-05/06 validation correction and ABC annotation migration
+
+### Validation issue
+
+- Whole-chromosome CV is invalid for selecting `lambda` in the gene-indexed COMPASS model.
+- When a chromosome is held out, most held-out genes have no training annotations, so the validation task becomes extrapolation to unseen genes.
+- The previous chromosome-CV null result should be treated as a validation diagnostic, not a biological AD conclusion.
+
+### New annotation source
+
+- Downloaded public ABC predictions:
+  `/gpfs/commons/home/daknowles/knowles_lab/data/compass/raw/abc/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz`.
+- Source URL:
+  `https://mitra.stanford.edu/engreitz/oak/public/Nasser2021/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz`.
+- The file is the Nasser et al. 2021 all-biosample ABC table containing element-gene links with ABC score at least 0.015.
+- `scripts/download_required_data.py --download-abc` now reproduces the download.
+
+### New CV design
+
+- `src/compass/data.py::load_abc_annotations` intersects GWAS variants with ABC CRE intervals.
+- Annotation values are ABC scores for variant-overlapping CRE-gene-biosample links.
+- Nearby CREs for the same gene are collapsed into coarse LD-distance clusters using `--cre-ld-gap`, default `1,000,000` bp.
+- CRE clusters for the same gene are assigned across `--cre-folds`, default `5`.
+- Variant rows inherit a CRE fold when their overlapping CRE-gene links agree; ambiguous variants are allowed in training but not used as held-out validation rows.
+- `src/compass/model.py` now uses grouped variant CV (`cv_method=cre_ld_group`) and no longer calls chromosome-heldout CV from the fit path.
+
+### Default AD ABC contexts
+
+- The public table has three brain-labelled biosamples by name:
+  `astrocyte-ENCODE`,
+  `bipolar_neuron_from_iPSC-ENCODE`,
+  `H1_Derived_Neuronal_Progenitor_Cultured_Cells-Roadmap`.
+- These are now the default `--abc-cell-types` for AD.
+- Passing `--abc-cell-types all` uses all 131 public ABC biosamples.
+
+### Setup test
+
+- Completed a setup-only run for the three brain-labelled ABC biosamples.
+- Cached GWAS load took about 11 seconds.
+- ABC overlap construction took about 134 seconds.
+- GWAS alignment took about 3 seconds and annotation matrix construction took about 0.02 seconds.
+- LD assembly over 910 blocks took about 1933 seconds with 8 jobs.
+- Final cached ABC design: 171,788 variants, 67,196 gene-context parameters, 1,291,460 annotation nonzeros, and 40,455,388 LD nonzeros.
+- A small synthetic smoke test exercised `fit_nuclear_norm_path` with `cv_method=cre_ld_group`; it produced fold scores for folds `[0, 1]` and selected among the provided lambdas.

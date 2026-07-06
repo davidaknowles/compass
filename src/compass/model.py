@@ -18,6 +18,7 @@ class CompassDataset:
     chrom: np.ndarray
     n_samples: float | np.ndarray
     sample_weight: np.ndarray | None = None
+    cv_groups: np.ndarray | None = None
 
     @property
     def n_variants(self) -> int:
@@ -350,10 +351,11 @@ def _subset_dataset(dataset: CompassDataset, keep: np.ndarray) -> CompassDataset
         chrom=dataset.chrom[keep],
         n_samples=n_samples,
         sample_weight=None if dataset.sample_weight is None else dataset.sample_weight[keep],
+        cv_groups=None if dataset.cv_groups is None else dataset.cv_groups[keep],
     )
 
 
-def leave_one_chrom_cv(
+def grouped_variant_cv(
     dataset: CompassDataset,
     n_genes: int,
     n_mechanisms: int,
@@ -365,11 +367,17 @@ def leave_one_chrom_cv(
     folds: list[int] | None = None,
     **kwargs,
 ) -> dict[float, float]:
+    if dataset.cv_groups is None:
+        raise ValueError("CRE-structured CV requires dataset.cv_groups")
+    groups = np.asarray(dataset.cv_groups)
+    available = sorted(int(x) for x in np.unique(groups) if int(x) >= 0)
+    if not available:
+        raise ValueError("CRE-structured CV requires at least one non-negative CV group")
     scores: dict[float, list[float]] = {float(lam): [] for lam in lambdas}
-    chroms = sorted(np.unique(dataset.chrom).astype(int).tolist()) if folds is None else folds
-    for chrom in chroms:
-        train = dataset.chrom != chrom
-        test = dataset.chrom == chrom
+    selected_folds = available if folds is None else [int(fold) for fold in folds]
+    for fold in selected_folds:
+        train = groups != fold
+        test = groups == fold
         if train.sum() == 0 or test.sum() == 0:
             continue
         train_ds = _subset_dataset(dataset, train)
@@ -435,14 +443,17 @@ def fit_nuclear_norm_path(
     **kwargs,
 ) -> FitResult:
     ordered = sorted([float(l) for l in lambdas], reverse=True)
-    cv_scores = leave_one_chrom_cv(dataset, n_genes, n_mechanisms, ordered, method="nuclear", **kwargs) if cv else None
+    cv_scores = grouped_variant_cv(dataset, n_genes, n_mechanisms, ordered, method="nuclear", **kwargs) if cv else None
     best = min(cv_scores, key=cv_scores.get) if cv_scores else ordered[-1]
     init_B = None
     init_tau = 1e-8
     losses_all: list[float] = []
+    cv_folds = None
+    if cv and dataset.cv_groups is not None:
+        cv_folds = sorted(int(x) for x in np.unique(dataset.cv_groups) if int(x) >= 0)
     metadata = {
-        "cv_method": "leave_one_chromosome" if cv else None,
-        "cv_folds": sorted(np.unique(dataset.chrom).astype(int).tolist()) if cv else None,
+        "cv_method": "cre_ld_group" if cv else None,
+        "cv_folds": cv_folds,
     }
     B = None
     tau = init_tau
@@ -469,15 +480,18 @@ def fit_rank1_path(
     **kwargs,
 ) -> FitResult:
     ordered = sorted([float(l) for l in lambdas], reverse=True)
-    cv_scores = leave_one_chrom_cv(dataset, n_genes, n_mechanisms, ordered, method="rank1", **kwargs) if cv else None
+    cv_scores = grouped_variant_cv(dataset, n_genes, n_mechanisms, ordered, method="rank1", **kwargs) if cv else None
     best = min(cv_scores, key=cv_scores.get) if cv_scores else ordered[-1]
     init_s = None
     init_w = None
     init_tau = 1e-8
     losses_all: list[float] = []
+    cv_folds = None
+    if cv and dataset.cv_groups is not None:
+        cv_folds = sorted(int(x) for x in np.unique(dataset.cv_groups) if int(x) >= 0)
     metadata = {
-        "cv_method": "leave_one_chromosome" if cv else None,
-        "cv_folds": sorted(np.unique(dataset.chrom).astype(int).tolist()) if cv else None,
+        "cv_method": "cre_ld_group" if cv else None,
+        "cv_folds": cv_folds,
     }
     B = None
     tau = init_tau

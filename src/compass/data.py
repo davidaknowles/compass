@@ -31,6 +31,10 @@ def _variant_id(chr_values: pd.Series, pos_values: pd.Series) -> pd.Series:
     return "chr" + chr_values.astype(str) + ":" + pos_values.astype(str)
 
 
+def _normalize_chrom(chrom: pd.Series) -> pd.Series:
+    return pd.to_numeric(chrom.astype(str).str.replace("chr", "", regex=False), errors="coerce")
+
+
 def load_top_assoc_annotations(
     top_assoc_dir: str | Path,
     annotation_value: str = "z2",
@@ -59,9 +63,7 @@ def load_top_assoc_annotations(
         df = pd.read_csv(file, sep="\t", usecols=usecols)
         df = df.rename(columns={"feature": "gene", "CHR": "chrom", "POS": "pos"})
         df["mechanism"] = mechanism
-        df["chrom"] = pd.to_numeric(
-            df["chrom"].astype(str).str.replace("chr", "", regex=False), errors="coerce"
-        )
+        df["chrom"] = _normalize_chrom(df["chrom"])
         df["pos"] = pd.to_numeric(df["pos"], errors="coerce")
         df = df[df["chrom"].between(1, 22) & df["pos"].notna()].copy()
         df["chrom"] = df["chrom"].astype(int)
@@ -135,6 +137,176 @@ def load_top_assoc_annotations(
     triples = triples.groupby(["variant_idx", "gene_idx", "mechanism_idx"], as_index=False)[
         "value"
     ].max()
+    return AnnotationData(
+        variants=variants.reset_index(drop=True),
+        genes=genes.reset_index(drop=True),
+        mechanisms=mechanisms,
+        triples=triples.reset_index(drop=True),
+    )
+
+
+def _parse_cell_types(value: str | Iterable[str] | None) -> set[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value.lower() in {"", "all"}:
+            return None
+        return {x.strip() for x in value.split(",") if x.strip()}
+    return {str(x).strip() for x in value if str(x).strip()}
+
+
+def load_abc_annotations(
+    abc_path: str | Path,
+    gwas: pd.DataFrame,
+    score_column: str = "ABC.Score",
+    min_score: float = 0.015,
+    cell_types: str | Iterable[str] | None = None,
+    add_intercept: bool = True,
+    n_folds: int = 5,
+    ld_gap: int = 1_000_000,
+    chunksize: int = 200_000,
+) -> AnnotationData:
+    """Load public ABC enhancer-gene links as sparse variant-gene annotations.
+
+    Variants are GWAS variants that fall inside an ABC candidate regulatory
+    element (CRE). The annotation value is the ABC score for the CRE-gene link
+    in the corresponding biosample/cell type. CRE cross-validation groups are
+    assigned within each gene after collapsing nearby CREs into coarse
+    LD-distance clusters.
+    """
+
+    abc_path = Path(abc_path).expanduser()
+    if n_folds < 2:
+        raise ValueError("n_folds must be at least 2 for CRE-structured CV")
+    if ld_gap <= 0:
+        raise ValueError("ld_gap must be positive")
+    if "chrom" not in gwas.columns or "pos" not in gwas.columns:
+        raise ValueError("ABC annotations require GWAS chromosome and position columns")
+
+    keep_cell_types = _parse_cell_types(cell_types)
+    gwas_variants = gwas.dropna(subset=["chrom", "pos"]).copy()
+    gwas_variants["chrom"] = _normalize_chrom(gwas_variants["chrom"])
+    gwas_variants["pos"] = pd.to_numeric(gwas_variants["pos"], errors="coerce")
+    gwas_variants = gwas_variants[gwas_variants["chrom"].between(1, 22) & gwas_variants["pos"].notna()].copy()
+    gwas_variants["chrom"] = gwas_variants["chrom"].astype(int)
+    gwas_variants["pos"] = gwas_variants["pos"].astype(int)
+    if "variant_id" not in gwas_variants.columns:
+        gwas_variants["variant_id"] = _variant_id(gwas_variants["chrom"], gwas_variants["pos"])
+    if "snp" in gwas_variants.columns:
+        gwas_variants["MarkerID"] = gwas_variants["snp"].astype(str)
+    else:
+        gwas_variants["MarkerID"] = gwas_variants["variant_id"].astype(str)
+    gwas_variants = gwas_variants.drop_duplicates("variant_id").sort_values(["chrom", "pos", "variant_id"])
+
+    chrom_lookup: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    gwas_records: dict[str, dict] = {}
+    variant_rows: dict[str, dict] = {}
+    for chrom, group in gwas_variants.groupby("chrom", sort=False):
+        ids = group["variant_id"].astype(str).to_numpy()
+        positions = group["pos"].to_numpy(np.int64)
+        order = np.argsort(positions, kind="mergesort")
+        chrom_lookup[int(chrom)] = (positions[order], ids[order])
+    for row in gwas_variants[["variant_id", "chrom", "pos", "MarkerID"]].itertuples(index=False):
+        gwas_records[str(row.variant_id)] = {
+            "variant_id": str(row.variant_id),
+            "chrom": int(row.chrom),
+            "pos": int(row.pos),
+            "MarkerID": str(row.MarkerID),
+        }
+
+    gene_to_idx: dict[str, int] = {}
+    mechanism_to_idx: dict[str, int] = {}
+    mechanisms: list[str] = []
+    if add_intercept:
+        mechanism_to_idx["intercept"] = 0
+        mechanisms.append("intercept")
+    cluster_fold: dict[tuple[int, int, int], int] = {}
+    gene_clusters: dict[int, set[tuple[int, int]]] = {}
+    raw_records: list[tuple[str, int, int, float, int]] = []
+    usecols = ["chr", "start", "end", "TargetGene", score_column, "CellType"]
+
+    compression = "gzip" if abc_path.suffix == ".gz" else None
+    reader = pd.read_csv(abc_path, sep="\t", usecols=usecols, compression=compression, chunksize=chunksize)
+    for chunk in reader:
+        chunk = chunk.rename(columns={"chr": "chrom", score_column: "score"})
+        chunk["chrom"] = _normalize_chrom(chunk["chrom"])
+        chunk["start"] = pd.to_numeric(chunk["start"], errors="coerce")
+        chunk["end"] = pd.to_numeric(chunk["end"], errors="coerce")
+        chunk["score"] = pd.to_numeric(chunk["score"], errors="coerce")
+        chunk = chunk.dropna(subset=["chrom", "start", "end", "TargetGene", "score", "CellType"])
+        chunk = chunk[chunk["chrom"].between(1, 22) & (chunk["score"] >= min_score)].copy()
+        if keep_cell_types is not None:
+            chunk = chunk[chunk["CellType"].isin(keep_cell_types)].copy()
+        if chunk.empty:
+            continue
+        chunk["chrom"] = chunk["chrom"].astype(int)
+        chunk["start"] = chunk["start"].astype(int)
+        chunk["end"] = chunk["end"].astype(int)
+        for row in chunk.itertuples(index=False):
+            chrom = int(row.chrom)
+            if chrom not in chrom_lookup:
+                continue
+            gene = str(row.TargetGene)
+            mechanism = str(row.CellType)
+            gene_idx = gene_to_idx.setdefault(gene, len(gene_to_idx))
+            if mechanism not in mechanism_to_idx:
+                mechanism_to_idx[mechanism] = len(mechanisms)
+                mechanisms.append(mechanism)
+            mechanism_idx = mechanism_to_idx[mechanism]
+            positions, variant_ids = chrom_lookup[chrom]
+            lo = int(np.searchsorted(positions, int(row.start), side="left"))
+            hi = int(np.searchsorted(positions, int(row.end), side="right"))
+            if hi <= lo:
+                continue
+            cluster = int(((int(row.start) + int(row.end)) // 2) // ld_gap)
+            gene_clusters.setdefault(gene_idx, set()).add((chrom, cluster))
+            raw_records.extend(
+                (str(variant_id), gene_idx, mechanism_idx, float(row.score), chrom * 10_000_000 + cluster)
+                for variant_id in variant_ids[lo:hi]
+            )
+            if add_intercept:
+                raw_records.extend(
+                    (str(variant_id), gene_idx, mechanism_to_idx["intercept"], 1.0, chrom * 10_000_000 + cluster)
+                    for variant_id in variant_ids[lo:hi]
+            )
+            for variant_id in variant_ids[lo:hi]:
+                variant_id = str(variant_id)
+                if variant_id not in variant_rows:
+                    variant_rows[variant_id] = gwas_records[variant_id]
+
+    if not raw_records:
+        raise ValueError(f"No ABC CREs in {abc_path} overlapped GWAS variants")
+
+    for gene_idx, clusters in gene_clusters.items():
+        for offset, (chrom, cluster) in enumerate(sorted(clusters)):
+            cluster_fold[(gene_idx, chrom * 10_000_000 + cluster)] = offset % n_folds
+
+    variants = pd.DataFrame(variant_rows.values()).sort_values(["chrom", "pos", "variant_id"]).reset_index(drop=True)
+    variants["variant_idx"] = np.arange(variants.shape[0], dtype=np.int64)
+    variant_to_idx = dict(zip(variants["variant_id"].astype(str), variants["variant_idx"]))
+
+    triples = pd.DataFrame(raw_records, columns=["variant_id", "gene_idx", "mechanism_idx", "value", "cluster_key"])
+    triples["variant_idx"] = triples["variant_id"].map(variant_to_idx).astype(np.int64)
+    triples["cre_fold"] = [
+        cluster_fold.get((int(gene_idx), int(cluster_key)), -1)
+        for gene_idx, cluster_key in zip(triples["gene_idx"], triples["cluster_key"])
+    ]
+    fold_sets = triples.groupby("variant_idx")["cre_fold"].agg(lambda x: set(int(v) for v in x if int(v) >= 0))
+    variant_folds = np.full(variants.shape[0], -1, dtype=np.int64)
+    for variant_idx, folds in fold_sets.items():
+        if len(folds) == 1:
+            variant_folds[int(variant_idx)] = next(iter(folds))
+    variants["cv_group"] = variant_folds
+    triples = (
+        triples[["variant_idx", "gene_idx", "mechanism_idx", "value"]]
+        .groupby(["variant_idx", "gene_idx", "mechanism_idx"], as_index=False)["value"]
+        .max()
+    )
+
+    genes = pd.DataFrame(
+        sorted(gene_to_idx.items(), key=lambda item: item[1]),
+        columns=["gene", "gene_idx"],
+    )
     return AnnotationData(
         variants=variants.reset_index(drop=True),
         genes=genes.reset_index(drop=True),

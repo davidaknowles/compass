@@ -17,6 +17,7 @@ python scripts/download_required_data.py \
   --data-root /gpfs/commons/home/daknowles/knowles_lab/data/compass \
   --download-top-assoc \
   --download-ad \
+  --download-abc \
   --download-ld-metadata \
   --download-ld-npz \
   --jobs 8
