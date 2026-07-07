@@ -437,16 +437,24 @@ def annotation_triples_to_csr(triples: pd.DataFrame, n_variants: int, n_genes: i
     return sp.coo_matrix((val, (row, col)), shape=(n_variants, n_genes * n_mechanisms)).tocsr()
 
 
-def scipy_to_torch_sparse(matrix: sp.spmatrix, device: str = "cpu", dtype=None, layout: str = "coo"):
+def scipy_to_torch_sparse(
+    matrix: sp.spmatrix,
+    device: str = "cpu",
+    dtype=None,
+    layout: str = "coo",
+    index_dtype=None,
+):
     import torch
 
     if dtype is None:
         dtype = torch.float32
+    if index_dtype is None:
+        index_dtype = torch.long
     if layout == "csr":
         csr = matrix.tocsr()
         return torch.sparse_csr_tensor(
-            torch.as_tensor(csr.indptr, dtype=torch.long, device=device),
-            torch.as_tensor(csr.indices, dtype=torch.long, device=device),
+            torch.as_tensor(csr.indptr, dtype=index_dtype, device=device),
+            torch.as_tensor(csr.indices, dtype=index_dtype, device=device),
             torch.as_tensor(csr.data, dtype=dtype, device=device),
             size=csr.shape,
             device=device,

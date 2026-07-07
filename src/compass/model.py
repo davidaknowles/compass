@@ -112,6 +112,10 @@ def _ld_torch_layout(device: str) -> str:
     return "csr" if torch.device(device).type == "cuda" else "coo"
 
 
+def _ld_index_dtype(device: str):
+    return torch.int32 if torch.device(device).type == "cuda" else torch.long
+
+
 def _clear_cuda_cache(device: str) -> None:
     if torch.device(device).type == "cuda" and torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -190,13 +194,26 @@ def _backward_data_loss(
     device: str,
     total_den: int,
     ld_chunk_nnz: int | None,
+    stats: dict[str, float],
 ) -> float:
     loss_value = 0.0
     ld_layout = _ld_torch_layout(device)
+    ld_index_dtype = _ld_index_dtype(device)
     for block in block_specs:
         R2_cpu = _block_r2_cpu(block)
         for start, end, R2_chunk in _iter_csr_row_chunks(R2_cpu, ld_chunk_nnz):
-            R2_t = scipy_to_torch_sparse(R2_chunk, device=device, dtype=torch.float16, layout=ld_layout)
+            stats["ld_chunks"] += 1
+            stats["ld_chunk_nnz_total"] += int(R2_chunk.nnz)
+            chunk_start = perf_counter()
+            R2_t = scipy_to_torch_sparse(
+                R2_chunk,
+                device=device,
+                dtype=torch.float16,
+                layout=ld_layout,
+                index_dtype=ld_index_dtype,
+            )
+            stats["ld_sparse_convert_seconds"] += perf_counter() - chunk_start
+            eval_start = perf_counter()
             pred = predict_factorized(
                 B,
                 tau_raw,
@@ -209,6 +226,9 @@ def _backward_data_loss(
             loss_block = torch.sum(block["weight"][start:end] * residual.square()) / max(total_den, 1)
             loss_value += float(loss_block.detach().cpu())
             loss_block.backward()
+            if torch.device(device).type == "cuda" and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            stats["ld_eval_backward_seconds"] += perf_counter() - eval_start
             del R2_t, pred, residual, loss_block, R2_chunk
             _clear_cuda_cache(device)
         del R2_cpu
@@ -313,6 +333,12 @@ def fit_nuclear_norm(
 
     losses: list[float] = []
     start = perf_counter()
+    ld_stats = {
+        "ld_chunks": 0,
+        "ld_chunk_nnz_total": 0,
+        "ld_sparse_convert_seconds": 0.0,
+        "ld_eval_backward_seconds": 0.0,
+    }
     best_loss = np.inf
     best_B = B.detach().clone()
     best_tau_raw = tau_raw.detach().clone()
@@ -321,7 +347,7 @@ def fit_nuclear_norm(
             B.grad.zero_()
         if tau_raw.grad is not None:
             tau_raw.grad.zero_()
-        loss_value = _backward_data_loss(block_specs, B, tau_raw, device, total_den, ld_chunk_nnz)
+        loss_value = _backward_data_loss(block_specs, B, tau_raw, device, total_den, ld_chunk_nnz, ld_stats)
         if np.isfinite(loss_value) and loss_value < best_loss:
             best_loss = loss_value
             best_B = B.detach().clone()
@@ -356,8 +382,10 @@ def fit_nuclear_norm(
         "seconds": perf_counter() - start,
         "ld_blocks": len(block_specs),
         "ld_gpu_layout": _ld_torch_layout(device),
+        "ld_index_dtype": str(_ld_index_dtype(device)).replace("torch.", ""),
         "ld_nnz": int(sum(block["R2_nnz"] for block in block_specs)),
         "ld_chunk_nnz": ld_chunk_nnz,
+        **ld_stats,
         "svd_method": svd_method,
         "svd_rank": svd_rank,
         "grad_clip": grad_clip,
@@ -416,6 +444,12 @@ def fit_rank1_alt(
     opt_w = torch.optim.Adam([w_raw, tau_raw], lr=lr)
     losses: list[float] = []
     start = perf_counter()
+    ld_stats = {
+        "ld_chunks": 0,
+        "ld_chunk_nnz_total": 0,
+        "ld_sparse_convert_seconds": 0.0,
+        "ld_eval_backward_seconds": 0.0,
+    }
     last_B = None
 
     for it in range(max_iter):
@@ -423,13 +457,25 @@ def fit_rank1_alt(
         opt.zero_grad()
         data_loss = 0.0
         ld_layout = _ld_torch_layout(device)
+        ld_index_dtype = _ld_index_dtype(device)
         for block in block_specs:
             R2_cpu = _block_r2_cpu(block)
             for start, end, R2_chunk in _iter_csr_row_chunks(R2_cpu, ld_chunk_nnz):
+                ld_stats["ld_chunks"] += 1
+                ld_stats["ld_chunk_nnz_total"] += int(R2_chunk.nnz)
                 s = torch.nn.functional.softplus(s_raw)
                 w = _normalize_simplex(w_raw, constrain_w_simplex)
                 B = torch.outer(s, w)
-                R2_t = scipy_to_torch_sparse(R2_chunk, device=device, dtype=torch.float16, layout=ld_layout)
+                chunk_start = perf_counter()
+                R2_t = scipy_to_torch_sparse(
+                    R2_chunk,
+                    device=device,
+                    dtype=torch.float16,
+                    layout=ld_layout,
+                    index_dtype=ld_index_dtype,
+                )
+                ld_stats["ld_sparse_convert_seconds"] += perf_counter() - chunk_start
+                eval_start = perf_counter()
                 pred = predict_factorized(
                     B,
                     tau_raw,
@@ -442,6 +488,9 @@ def fit_rank1_alt(
                 loss_block = torch.sum(block["weight"][start:end] * residual.square()) / max(total_den, 1)
                 data_loss += float(loss_block.detach().cpu())
                 loss_block.backward()
+                if torch.device(device).type == "cuda" and torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                ld_stats["ld_eval_backward_seconds"] += perf_counter() - eval_start
                 del R2_t, pred, residual, loss_block, B, R2_chunk
                 _clear_cuda_cache(device)
             del R2_cpu
@@ -467,8 +516,10 @@ def fit_rank1_alt(
         "constrain_w_simplex": constrain_w_simplex,
         "ld_blocks": len(block_specs),
         "ld_gpu_layout": _ld_torch_layout(device),
+        "ld_index_dtype": str(_ld_index_dtype(device)).replace("torch.", ""),
         "ld_nnz": int(sum(block["R2_nnz"] for block in block_specs)),
         "ld_chunk_nnz": ld_chunk_nnz,
+        **ld_stats,
         "model_dtype": model_dtype,
         "ld_dtype": "float16",
     }

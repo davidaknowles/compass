@@ -132,6 +132,9 @@
 - Added `--ld-chunk-nnz` so each chromosome is evaluated in row chunks while retaining chromosome-level CPU/cache organization.
 - Annotation sparse matmul now remains fp32; fp16 model dtype stores/updates model parameters in half but casts coefficients to fp32 for the annotation multiply, while LD remains fp16.
 - L40S chunk smoke job `18709273` completed for both `model_dtype=float32` and `model_dtype=float16` with `ld_gpu_layout=csr`.
+- L40S int32 CSR smoke job `18709337` confirmed fp16 CSR sparse matmul and backward work with int32 `crow_indices` and `col_indices`.
+- Added int32 CUDA CSR indices for LD chunks and timing metadata for LD chunk conversion and eval/backward time.
+- Model-path L40S smoke job `18709338` completed with `ld_gpu_layout=csr`, `ld_index_dtype=int32`, and populated LD chunk timing fields.
 
 ### Obsolete annotated-only setup test
 
