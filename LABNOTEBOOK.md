@@ -128,6 +128,10 @@
 - Each objective pass now converts only the active chromosome `R2` block to a torch fp16 sparse tensor, evaluates that block, immediately backpropagates its normalized loss contribution, then releases the block graph before moving to the next chromosome.
 - On CUDA, LD conversion uses torch sparse CSR to avoid COO `coalesce()` memory overhead; CPU smoke tests continue to use COO because fp16 CSR matmul is not implemented on CPU in the current Torch build.
 - CRE-fold CV subsetting now stores local chromosome row indices instead of eagerly copying full train/test LD matrices.
+- Full streaming jobs `18708903` and `18708904` still failed on L40S: fp32 OOMed during backward for a whole chromosome block, and fp16 model dtype exposed that CUDA sparse COO annotation matmul is not implemented for half.
+- Added `--ld-chunk-nnz` so each chromosome is evaluated in row chunks while retaining chromosome-level CPU/cache organization.
+- Annotation sparse matmul now remains fp32; fp16 model dtype stores/updates model parameters in half but casts coefficients to fp32 for the annotation multiply, while LD remains fp16.
+- L40S chunk smoke job `18709273` completed for both `model_dtype=float32` and `model_dtype=float16` with `ld_gpu_layout=csr`.
 
 ### Obsolete annotated-only setup test
 

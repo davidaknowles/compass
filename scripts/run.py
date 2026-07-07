@@ -279,6 +279,7 @@ def main() -> None:
     parser.add_argument("--svd-rank", type=int, default=None)
     parser.add_argument("--svd-oversamples", type=int, default=5)
     parser.add_argument("--svd-n-iter", type=int, default=2)
+    parser.add_argument("--ld-chunk-nnz", type=int, default=100_000_000)
     parser.add_argument("--ld-jobs", type=int, default=8)
     parser.add_argument("--ld-r2-cutoff", type=float, default=0.01)
     parser.add_argument("--cache-dir", default=None)
@@ -430,6 +431,7 @@ def main() -> None:
             svd_rank=args.svd_rank,
             svd_oversamples=args.svd_oversamples,
             svd_n_iter=args.svd_n_iter,
+            ld_chunk_nnz=args.ld_chunk_nnz,
         )
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -458,6 +460,7 @@ def main() -> None:
         "device": device,
         "model_dtype": args.model_dtype,
         "ld_dtype": "float16",
+        "ld_chunk_nnz": args.ld_chunk_nnz,
         "svd_method": args.svd_method,
         "svd_rank": args.svd_rank,
         "ld_jobs": args.ld_jobs,

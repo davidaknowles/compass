@@ -81,9 +81,9 @@ def predict_factorized(
     ld_score: torch.Tensor,
     n_samples: float | torch.Tensor,
 ) -> torch.Tensor:
-    mediated = torch.sparse.mm(A_t, _flatten_B(B).unsqueeze(1)).squeeze(1)
+    mediated = torch.sparse.mm(A_t, _flatten_B(B).to(A_t.dtype).unsqueeze(1)).squeeze(1)
     smoothed = torch.sparse.mm(R2_t, mediated.to(R2_t.dtype).unsqueeze(1)).squeeze(1).float()
-    tau = torch.nn.functional.softplus(tau_raw)
+    tau = torch.nn.functional.softplus(tau_raw).float()
     return 1.0 + n_samples * (smoothed + tau * ld_score)
 
 
@@ -120,7 +120,6 @@ def _clear_cuda_cache(device: str) -> None:
 def _prepare_fit_blocks(
     dataset: CompassDataset,
     device: str,
-    train_dtype: torch.dtype,
 ) -> list[dict]:
     A = dataset.A.astype(np.float32)
     block_specs = []
@@ -142,7 +141,7 @@ def _prepare_fit_blocks(
             {
                 "chrom": block.chrom,
                 "rows": rows,
-                "A_t": scipy_to_torch_sparse(A_block, device=device, dtype=train_dtype),
+                "A_t": scipy_to_torch_sparse(A_block, device=device, dtype=torch.float32),
                 "R2_cpu": R2_block if block.R2_local_rows is None else None,
                 "R2_source": block,
                 "R2_nnz": int(R2_block.nnz),
@@ -163,31 +162,56 @@ def _block_r2_cpu(block_spec: dict) -> sp.csr_matrix:
     return _materialize_block_r2(block_spec["R2_source"]).astype(np.float32, copy=False)
 
 
+def _iter_csr_row_chunks(matrix: sp.csr_matrix, max_nnz: int | None):
+    n_rows = matrix.shape[0]
+    if max_nnz is None or max_nnz <= 0 or matrix.nnz <= max_nnz:
+        yield 0, n_rows, matrix
+        return
+    indptr = matrix.indptr
+    start = 0
+    while start < n_rows:
+        target = int(indptr[start]) + int(max_nnz)
+        end = int(np.searchsorted(indptr, target, side="right") - 1)
+        end = max(start + 1, min(end, n_rows))
+        yield start, end, matrix[start:end]
+        start = end
+
+
+def _slice_vector(x: torch.Tensor, start: int, end: int) -> torch.Tensor:
+    if x.ndim == 0:
+        return x
+    return x[start:end]
+
+
 def _backward_data_loss(
     block_specs: list[dict],
     B: torch.Tensor,
     tau_raw: torch.Tensor,
     device: str,
     total_den: int,
+    ld_chunk_nnz: int | None,
 ) -> float:
     loss_value = 0.0
     ld_layout = _ld_torch_layout(device)
     for block in block_specs:
-        R2_t = scipy_to_torch_sparse(_block_r2_cpu(block), device=device, dtype=torch.float16, layout=ld_layout)
-        pred = predict_factorized(
-            B,
-            tau_raw,
-            block["A_t"],
-            R2_t,
-            block["ld_score"],
-            block["n_samples"],
-        )
-        residual = block["chisq"] - pred
-        loss_block = torch.sum(block["weight"] * residual.square()) / max(total_den, 1)
-        loss_value += float(loss_block.detach().cpu())
-        loss_block.backward()
-        del R2_t, pred, residual, loss_block
-        _clear_cuda_cache(device)
+        R2_cpu = _block_r2_cpu(block)
+        for start, end, R2_chunk in _iter_csr_row_chunks(R2_cpu, ld_chunk_nnz):
+            R2_t = scipy_to_torch_sparse(R2_chunk, device=device, dtype=torch.float16, layout=ld_layout)
+            pred = predict_factorized(
+                B,
+                tau_raw,
+                block["A_t"],
+                R2_t,
+                block["ld_score"][start:end],
+                _slice_vector(block["n_samples"], start, end),
+            )
+            residual = block["chisq"][start:end] - pred
+            loss_block = torch.sum(block["weight"][start:end] * residual.square()) / max(total_den, 1)
+            loss_value += float(loss_block.detach().cpu())
+            loss_block.backward()
+            del R2_t, pred, residual, loss_block, R2_chunk
+            _clear_cuda_cache(device)
+        del R2_cpu
     return loss_value
 
 
@@ -273,11 +297,12 @@ def fit_nuclear_norm(
     svd_n_iter: int = 2,
     grad_clip: float | None = 1.0,
     model_dtype: str = "float32",
+    ld_chunk_nnz: int | None = 100_000_000,
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit the convex non-negative nuclear-norm COMPASS relaxation."""
 
     train_dtype = _torch_dtype(model_dtype)
-    block_specs = _prepare_fit_blocks(dataset, device, train_dtype)
+    block_specs = _prepare_fit_blocks(dataset, device)
     total_den = int(sum(block["rows"].size for block in block_specs))
 
     if init_B is None:
@@ -296,7 +321,7 @@ def fit_nuclear_norm(
             B.grad.zero_()
         if tau_raw.grad is not None:
             tau_raw.grad.zero_()
-        loss_value = _backward_data_loss(block_specs, B, tau_raw, device, total_den)
+        loss_value = _backward_data_loss(block_specs, B, tau_raw, device, total_den, ld_chunk_nnz)
         if np.isfinite(loss_value) and loss_value < best_loss:
             best_loss = loss_value
             best_B = B.detach().clone()
@@ -332,6 +357,7 @@ def fit_nuclear_norm(
         "ld_blocks": len(block_specs),
         "ld_gpu_layout": _ld_torch_layout(device),
         "ld_nnz": int(sum(block["R2_nnz"] for block in block_specs)),
+        "ld_chunk_nnz": ld_chunk_nnz,
         "svd_method": svd_method,
         "svd_rank": svd_rank,
         "grad_clip": grad_clip,
@@ -367,11 +393,12 @@ def fit_rank1_alt(
     constrain_w_simplex: bool = False,
     device: str = "cpu",
     model_dtype: str = "float32",
+    ld_chunk_nnz: int | None = 100_000_000,
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit rank-1 B = s w' with alternating Torch updates for s and w."""
 
     train_dtype = _torch_dtype(model_dtype)
-    block_specs = _prepare_fit_blocks(dataset, device, train_dtype)
+    block_specs = _prepare_fit_blocks(dataset, device)
     total_den = int(sum(block["rows"].size for block in block_specs))
 
     s_raw0 = np.full(n_genes, -8.0, dtype=np.float32) if init_s is None else np.log(np.expm1(np.maximum(init_s, 1e-12)))
@@ -397,24 +424,27 @@ def fit_rank1_alt(
         data_loss = 0.0
         ld_layout = _ld_torch_layout(device)
         for block in block_specs:
-            s = torch.nn.functional.softplus(s_raw)
-            w = _normalize_simplex(w_raw, constrain_w_simplex)
-            B = torch.outer(s, w)
-            R2_t = scipy_to_torch_sparse(_block_r2_cpu(block), device=device, dtype=torch.float16, layout=ld_layout)
-            pred = predict_factorized(
-                B,
-                tau_raw,
-                block["A_t"],
-                R2_t,
-                block["ld_score"],
-                block["n_samples"],
-            )
-            residual = block["chisq"] - pred
-            loss_block = torch.sum(block["weight"] * residual.square()) / max(total_den, 1)
-            data_loss += float(loss_block.detach().cpu())
-            loss_block.backward()
-            del R2_t, pred, residual, loss_block, B
-            _clear_cuda_cache(device)
+            R2_cpu = _block_r2_cpu(block)
+            for start, end, R2_chunk in _iter_csr_row_chunks(R2_cpu, ld_chunk_nnz):
+                s = torch.nn.functional.softplus(s_raw)
+                w = _normalize_simplex(w_raw, constrain_w_simplex)
+                B = torch.outer(s, w)
+                R2_t = scipy_to_torch_sparse(R2_chunk, device=device, dtype=torch.float16, layout=ld_layout)
+                pred = predict_factorized(
+                    B,
+                    tau_raw,
+                    block["A_t"],
+                    R2_t,
+                    block["ld_score"][start:end],
+                    _slice_vector(block["n_samples"], start, end),
+                )
+                residual = block["chisq"][start:end] - pred
+                loss_block = torch.sum(block["weight"][start:end] * residual.square()) / max(total_den, 1)
+                data_loss += float(loss_block.detach().cpu())
+                loss_block.backward()
+                del R2_t, pred, residual, loss_block, B, R2_chunk
+                _clear_cuda_cache(device)
+            del R2_cpu
         s = torch.nn.functional.softplus(s_raw)
         w = _normalize_simplex(w_raw, constrain_w_simplex)
         B = torch.outer(s, w)
@@ -438,6 +468,7 @@ def fit_rank1_alt(
         "ld_blocks": len(block_specs),
         "ld_gpu_layout": _ld_torch_layout(device),
         "ld_nnz": int(sum(block["R2_nnz"] for block in block_specs)),
+        "ld_chunk_nnz": ld_chunk_nnz,
         "model_dtype": model_dtype,
         "ld_dtype": "float16",
     }
