@@ -1,147 +1,176 @@
 \documentclass[11pt]{article}
-\usepackage{amsmath, amssymb, booktabs, geometry, hyperref}
+\usepackage{amsmath, amssymb, booktabs, geometry, hyperref, algorithm, algpseudocode}
 \geometry{letterpaper, margin=1in}
 
-\title{COMPASS with CRE-to-gene annotations for Alzheimer disease}
+\title{COMPASS: Convex Optimization of Mediated Polygenic Architecture via SNP Scores}
 \author{}
-\date{July 2026}
+\date{}
 
 \begin{document}
+
 \maketitle
 
 \begin{abstract}
-COMPASS estimates gene-by-context mediated trait contributions from GWAS
-summary statistics, SNP-to-gene annotations, and linkage disequilibrium (LD).
-An initial implementation selected the nuclear-norm penalty by leaving out
-entire chromosomes. That validation design is inappropriate for a gene-indexed
-model because most held-out chromosomes contain genes that are absent from the
-training chromosomes; it therefore tests extrapolation to unseen genes rather
-than generalization across regulatory elements for the same gene. We replaced
-chromosome-heldout validation with a CRE-structured design and switched the
-default annotations from one top eQTL per gene and cell type to public
-Activity-by-Contact (ABC) enhancer-gene scores. The revised workflow holds out
-LD-separated candidate regulatory element (CRE) groups within genes, so the
-same gene can contribute independent regulatory elements to both training and
-validation folds.
+We present a unified methodological framework for estimating gene-specific mediated heritability from genome-wide association study (GWAS) summary statistics using gene-variant annotations. While Mediated Expression Score Regression (MESC) relies on observed eQTL effect sizes, COMPASS can leverage arbitrary gene-variant annotations (e.g., deep learning predictions, Hi-C contact frequencies).  introduces an unknown annotation-weight vector, transforming the gene-level inference problem into a non-convex, bilinear trap. We demonstrate that relaxing the strict rank-1 assumption to a general gene-by-mechanism heritability matrix regularized by the nuclear norm yields a convex optimization landscape. This formulation natively identifies modular, multi-mechanism regulatory architectures across disease genes. Furthermore, we prove that enforcing strict non-negativity is essential to prevent linkage disequilibrium (LD) cancellation pathologies, where collinear LD among adjacent genes creates artificial, mutually cancelling positive and negative causal effect estimates. Finally, we provide an alternating projection algorithm combining Singular Value Thresholding (SVT) and non-negative clipping to fit the genome-wide model efficiently.
 \end{abstract}
 
 \section{Model}
-
-Let $\chi_j^2$ be the marginal GWAS statistic for variant $j$, and let
-$a_{jkl} \geq 0$ denote the annotation linking variant $j$ to gene $k$ in
-context $l$. In the revised implementation, $a_{jkl}$ is derived from CRE-to-gene
-ABC scores: a GWAS variant receives the ABC score of a CRE-gene pair when the
-variant lies inside that CRE. The context index $l$ denotes the ABC biosample or
-cellular context, with an optional intercept context.
-
-LD-smoothed annotations are
+Let $\omega_j$ denote the marginal effect of single nucleotide polymorphism (SNP) $j \in \{1, \dots, J\}$ on a complex trait. We model $\omega_j$ as a causal cascade mediated through genes $k \in \{1, \dots, K\}$:
 \begin{equation}
-    T_{jkl} = \sum_m r_{jm}^2 a_{mkl},
+    \omega_j = \sum_{k=1}^K \beta_{jk} \alpha_k + \gamma_j
 \end{equation}
-where $r_{jm}^2$ is squared LD. COMPASS models the expected summary statistic as
+where $\beta_{jk}$ is the true, unobserved regulatory effect of SNP $j$ on gene $k$, $\alpha_k$ is the causal effect of gene $k$ on the trait, and $\gamma_j \sim \mathcal{N}(0, \tau_\gamma)$ captures non-mediated (direct or pleiotropic) effects. 
+
+Instead of relying on empirical eQTLs, we utilize $L$ non-negative annotations $a_{jkl} \ge 0$ representing the predicted regulatory potential of SNP $j$ on gene $k$ via biological mechanism $l \in \{1, \dots, L\}$. We place a linear variance prior on the regulatory effects:
 \begin{equation}
-    E[\chi_j^2] =
-    1 + N_j \left(\sum_{k,l} B_{kl} T_{jkl} + \tau l_j \right),
+    \beta_{jk} \sim \mathcal{N}(0, V_{jk}) \quad \text{where} \quad V_{jk} = \sum_{l=1}^L w_l a_{jkl}
 \end{equation}
-where $B_{kl} \geq 0$ is the mediated contribution of gene $k$ through context
-$l$, $\tau \geq 0$ is a residual polygenic component, and
-$l_j=\sum_m r_{jm}^2$ is the LD score. The fitted objective is
+Here, $w_l \ge 0$ represents the unknown heritability contribution weight of mechanism $l$.
+
+\subsection{The infinitesimal Gaussian assumption and its limitations}
+
+A simple assumption would be infinitesmal effects,  $\alpha_k \sim \mathcal{N}(0, \tau_\alpha)$. Given that $\beta_{jk}$ and $\alpha_k$ are independent and mean-zero, the variance of their product is the product of their variances:
 \begin{equation}
-    \min_{B \geq 0,\tau \geq 0}
-    \frac{1}{J}\sum_j w_j
-    \left\{\chi_j^2 - 1 - N_j \left(\sum_{k,l} B_{kl}T_{jkl}+\tau l_j\right)\right\}^2
-    + \lambda \|B\|_* .
+    \text{Var}(\beta_{jk} \alpha_k) = \mathbb{E}[\beta_{jk}^2] \mathbb{E}[\alpha_k^2] = V_{jk} \tau_\alpha
 \end{equation}
-The nuclear norm encourages shared low-rank gene-by-context structure while the
-non-negativity constraint prevents LD-correlated neighboring annotations from
-fitting the same signal through cancelling positive and negative coefficients.
+Assuming independence across genes, we sum over genes, substitute the linear variance model for $V_{jk}$, and commute the sums:
+\begin{equation}
+    \text{Var}(\omega_j) = \sum_{k=1}^K V_{jk} \tau_\alpha + \tau_\gamma = \tau_\alpha \sum_{k=1}^K \left( \sum_{l=1}^L w_l a_{jkl} \right) + \tau_\gamma = \tau_\alpha \sum_{l=1}^L w_l \left( \sum_{k=1}^K a_{jkl} \right) + \tau_\gamma = \sum_{l=1}^L (\tau_\alpha w_l) A_{jl} + \tau_\gamma,
+\end{equation}
+where $A_{jl} \equiv \sum_{k=1}^K a_{jkl}$. The gene-aggregated matrix $A$ is therefore simply a $J \times L$ SNP annotation matrix: each column $A_{\cdot l}$ can be used as an ordinary S-LDSC annotation with coefficient $\theta_l = \tau_\alpha w_l$. Thus this model is almost trivial, involving just summing over genes.
 
-\section{ABC annotations}
+\subsection{Gene-specific resolution via conditional variance}
 
-The default annotation source is the public Nasser et al. ABC prediction table:
-all element-gene connections with ABC score at least 0.015 across 131 biosamples.
-The ABC model predicts enhancer-gene regulation from enhancer activity and
-enhancer-promoter contact; the public table is distributed by the Engreitz Lab
-and is linked from their resource page. The ABC documentation defines the score
-as activity times contact, normalized over candidate elements within 5 Mb of the
-gene promoter, and notes that predictions are same-chromosome CRE-gene links.
+To achieve gene-specific resolution we cannot rely on the infinitesimal Gaussian assumptions above. Here we consider conditioning the variance of the marginal effect on the specific causal trait variance of each gene, $s_k = \alpha_k^2 \ge 0$,
+\begin{equation}
+    \text{Var}(\omega_j \mid \alpha) = \sum_{k=1}^K s_k V_{jk} + \tau_\gamma
+\end{equation}
+Substituting this conditional variance into the expected GWAS $\chi^2$ statistic yields,
+\begin{align}
+    \mathbb{E}[\chi_j^2 \mid \alpha] &= 1 + N \sum_{m=1}^J r_{jm}^2 \text{Var}(\omega_m \mid \alpha) \nonumber \\
+    &= 1 + N \sum_{m=1}^J r_{jm}^2 \left( \sum_{k=1}^K s_k \sum_{l=1}^L w_l a_{mkl} + \tau_\gamma \right) \nonumber \\
+    &= 1 + N \sum_{k=1}^K \sum_{l=1}^L (s_k w_l) \mathcal{T}_{jkl} + N \tau_\gamma l_j
+\end{align}
+where $r_{jm}$ is LD, $l_j = \sum_m r_{jm}^2$ is the standard non-mediated LD score, and the deterministic, pre-computable, sparse 3D annotation-gene LD Tensor,
+\begin{equation}
+    \mathcal{T}_{jkl} = \sum_{m=1}^J r_{jm}^2 a_{mkl}.
+\end{equation}
 
-For Alzheimer disease (AD), the default run uses the brain-labelled biosamples
-available in this table: \texttt{astrocyte-ENCODE},
+Direct optimization of $s$ and $w$ has two pathologies:
+\begin{enumerate}
+    \item \textbf{Scale Non-Identifiability:} For any scalar $c > 0$, the transformation $s \to s/c$ and $w \to c w$ leaves the product $B = s w^T$ unchanged, rendering the individual scales of gene importance and annotation importance unidentifiable without arbitrary anchor priors. This is addressable, for example, by constraining the $L_1$ norm of $w$ (or $s$) to be 1, but this does not resolve the second pathology: 
+    \item \textbf{Non-Convexity:} The bilinear optimization is non-convex, containing saddle points and local minima where optimization routines can get trapped.
+\end{enumerate}
+
+
+\subsection{Convex Nuclear Norm Relaxation}
+
+Let $B_{kl} = s_k w_l$ define the $K \times L$ matrix of mediated heritability contributions. We relax the strict rank-1 constraint $B = s w^T$ by treating $B \in \mathbb{R}^{K \times L}$ as a general matrix parameter regularized by the nuclear norm $\|B\|_* = \sum_i \sigma_i(B)$, where $\sigma_i(B)$ are the singular values of $B$.
+
+We formulate the inference as a Weighted Ordinary Least Squares (WOLS) regression minimized over the space of non-negative matrices:
+\begin{equation}
+    \min_{B \in \mathbb{R}_{+}^{K \times L}, \; \tau_\gamma \ge 0} \quad \sum_{j=1}^J \eta_j \left( \chi_j^2 - 1 - N \sum_{k=1}^K \sum_{l=1}^L B_{kl} \mathcal{T}_{jkl} - N \tau_\gamma l_j \right)^2 + \lambda \|B\|_*
+\end{equation}
+where $\eta_j$ are standard S-LDSC regression weights accounting for LD redundancy and heteroskedasticity.
+
+This relaxation yields three (potential) advantages:
+\begin{itemize}
+    \item \textbf{Convexity:} Because the WOLS loss is convex with respect to $B$ and the nuclear norm is the convex envelope of the rank function, the objective is convex, guaranteeing that any local minimum is the unique global optimum.
+    \item \textbf{Discovery of Regulatory Modules:} Rather than enforcing regulatory homogeneity (where every causal gene obeys the exact same regulatory weight vector $w$), a low-rank solution $\text{rank}(B) = r > 1$ decomposes into $r$ distinct mechanistic archetypes via Singular Value Decomposition (SVD):
+    \begin{equation}
+        B = \sum_{i=1}^r \sigma_i u_i v_i^T
+    \end{equation}
+    Here, the right singular vectors $v_i \in \mathbb{R}^L$ represent distinct biological pathways (e.g., promoter-driven vs. distal Hi-C loop enhancer-driven), while the left singular vectors $u_i \in \mathbb{R}^K$ cluster disease genes by their physical mechanism of action.
+    \item \textbf{Computational Tractability:} Because the number of annotations $L$ is much smaller than the number of genes ($K \approx 20,000$), computing the reduced SVD during optimization takes $O(K L^2)$ time.
+\end{itemize}
+
+\section{Cell-Type Indexing}
+
+The index $l$ need not correspond to a biochemical mechanism such as promoter activity, enhancer activity, or chromatin contact class. The same derivation applies if $l$ indexes cell types or cellular contexts. In particular, consider the model
+\begin{equation}
+    \beta_{jkl} \sim \mathcal{N}(0, w_l a_{jkl})
+\end{equation}
+where $l$ indexes cell types. We now model, 
+\begin{equation}
+    \omega_j = \sum_{k=1}^K \sum_{l=1}^L \beta_{jkl} \alpha_{kl} + \gamma_j
+\end{equation}
+where $\alpha_{kl}$ is the causal effect of gene $k$ in cell type $l$ on the trait. 
+We then have,
+\begin{equation}
+    \text{Var}(\omega_j|\alpha) = \sum_{k=1}^K \sum_{l=1}^L \alpha_{kl}^2 w_l a_{jkl} + \tau_\gamma = \sum_{k=1}^K \sum_{l=1}^L B_{kl} a_{jkl} + \tau_\gamma
+\end{equation}
+where now $B_{kl} = \alpha_{kl}^2 w_l$ is the gene-by-cell-type mediated heritability matrix. The same convex nuclear norm relaxation applies, and the SVD of $B$ now identifies cell-type-specific regulatory modules.
+
+\subsection{The Necessity of Non-Negativity}
+While standard summary statistic methods occasionally tolerate negative enrichment parameters, enforcing $B_{kl} \ge 0$ is mandatory in this gene-centric framework. Without non-negativity constraints, the optimization landscape suffers from two failures:
+
+\paragraph{LD Collinearity Overfitting.}
+Neighboring genes on a chromosome reside within the same LD block, causing their annotation tensors to be highly collinear ($\mathcal{T}_{j, k_1, l} \approx \mathcal{T}_{j, k_2, l}$ for adjacent genes $k_1, k_2$). If an unconstrained model attempts to fit a localized GWAS signal corresponding to a true heritability contribution of $+10$, it can overfit statistical noise by assigning extreme, mutually cancelling coefficients to adjacent genes, e.g. $B_{k_1, l} = +100$ and $B_{k_2, l} = -90$ so that $B_{k_1, l} + B_{k_2, l} = +10$. This ``cancellation cheat'' preserves the macroscopic model fit while destroying gene-level resolution, creating phantom causal effects. The constraint $B_{kl} \ge 0$ acts as a regularizer against LD collinearity, forcing the model to assign heritability exclusively to the most parsimonious gene.
+
+\paragraph{Mathematical and Biological Plausibility}
+By definition, $B_{kl} = \alpha_k^2 w_l$ represents the variance of the causal trait effect mediated by gene $k$ via mechanism $l$. Variance cannot be negative. Further, because $\mathcal{T}_{jkl} \ge 0$, allowing negative entries in $B$ permits the model to predict $\mathbb{E}[\chi_j^2] < 1$, implying that genetic variation suppresses sampling noise—a statistical impossibility under the null hypothesis.
+
+\subsection{Optimization via Alternating Projections}
+
+Because standard Singular Value Thresholding (SVT) introduces orthogonal vectors with negative values, we must solve a Non-Negative Low-Rank Matrix Approximation problem. We solve this efficiently using Proximal Gradient Descent with Dykstra's Alternating Projections.
+
+Let $f(B, \tau_\gamma)$ denote the WOLS loss function from Equation (7). The algorithm proceeds as follows:
+
+\begin{algorithm}[H]
+\caption{Non-Negative Low-Rank Gene Heritability Regression}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Pre-computed tensor $\mathcal{T} \in \mathbb{R}_{+}^{J \times K \times L}$, GWAS $\chi^2 \in \mathbb{R}^J$, LD scores $l \in \mathbb{R}^J$, step size $\zeta$, regularization $\lambda$.
+\State \textbf{Initialize:} $B^{(0)} \gets \mathbf{0}_{K \times L}$, $\tau_\gamma^{(0)} \gets 0$
+\While{not converged}
+    \State \textbf{1. Gradient Step:}
+    \State $G^{(t)} \gets B^{(t)} - \zeta \nabla_B f(B^{(t)}, \tau_\gamma^{(t)})$
+    \State $\tau_\gamma^{(t+1)} \gets \max\left(0, \; \tau_\gamma^{(t)} - \zeta \nabla_{\tau_\gamma} f(B^{(t)}, \tau_\gamma^{(t)})\right)$
+    
+    \State \textbf{2. Singular Value Thresholding (Low-Rank Projection):}
+    \State Compute reduced SVD: $U, \Sigma, V^T = \text{SVD}(G^{(t)})$
+    \State $\tilde{\Sigma} \gets \text{diag}\left(\max(0, \; \sigma_i - \zeta \lambda)\right)$
+    
+    \State \textbf{3. Non-Negative Projection:}
+    \State $B^{(t+1)} \gets \max\left(\mathbf{0}_{K \times L}, \;U \tilde{\Sigma} V^T\right)$
+\EndWhile
+\State \textbf{Output:} Modular heritability matrix $B^* = B^{(t+1)}$, background pleiotropy $\tau_\gamma^* = \tau_\gamma^{(t+1)}$.
+\end{algorithmic}
+\end{algorithm}
+
+This algorithm converges to the global optimal modular architecture, avoiding non-convexity and LD collinearity artifacts.
+
+\section{Application to Alzheimer Disease (AD) GWAS}
+
+Our default annotation source is the public Nasser et al. ABC prediction table: all element-gene connections with ABC score at least 0.015 across 131 biosamples.
+The ABC model predicts enhancer-gene regulation from enhancer activity and enhancer-promoter contact; the public table is distributed by the Engreitz Lab and is linked from their resource page. The ABC documentation defines the score
+as activity times contact, normalized over candidate elements within 5 Mb of the gene promoter, and notes that predictions are same-chromosome CRE-gene links.
+
+For Alzheimer disease (AD), the default run uses the brain-labelled biosamples available in this table: \texttt{astrocyte-ENCODE},
 \texttt{bipolar\_neuron\_from\_iPSC-ENCODE}, and
-\texttt{H1\_Derived\_Neuronal\_Progenitor\_Cultured\_Cells-Roadmap}. Because the
-public table does not contain a microglia biosample, the default also includes
-myeloid proxy contexts: \texttt{CD14-positive\_monocyte-ENCODE},
+\texttt{H1\_Derived\_Neuronal\_Progenitor\_Cultured\_Cells-Roadmap}. Because the public table does not contain a microglia biosample, the default also includes myeloid proxy contexts: \texttt{CD14-positive\_monocyte-ENCODE},
 \texttt{CD14-positive\_monocytes-Roadmap}, and
-\texttt{THP-1\_macrophage-VanBortle2017}. The full 131-biosample table is
-downloaded and can be selected by passing \texttt{--abc-cell-types all}.
+\texttt{THP-1\_macrophage-VanBortle2017}. The full 131-biosample table is downloaded and can be selected by passing \texttt{--abc-cell-types all}.
 
-The implementation reads the ABC table in chunks, intersects each CRE interval
-with GWAS variants, and emits sparse variant-gene-context triples whose values
-are ABC scores. The regression row universe is not restricted to ABC-overlapping
-variants. Instead, COMPASS uses all GWAS variants represented in the UK Biobank
-LD reference panel. Variants outside ABC CREs have all-zero annotation rows but
-remain in the regression so they contribute to LD tagging and the residual
-non-ABC-mediated LD-score term. Nearby CREs for the same gene are collapsed into
+The implementation reads the ABC table in chunks, intersects each CRE interval with GWAS variants, and emits sparse variant-gene-context triples whose values are ABC scores. The regression row universe is not restricted to ABC-overlapping
+variants. Instead, COMPASS uses all GWAS variants represented in the UK Biobank LD reference panel. Variants outside ABC CREs have all-zero annotation rows but remain in the regression so they contribute to LD tagging and the residual non-ABC-mediated LD-score term. Nearby CREs for the same gene are collapsed into
 coarse LD-distance clusters before fold assignment.
 
-LD is represented as chromosome-level sparse blocks rather than a single
-genome-wide matrix. Raw UK Biobank correlations are converted to $r^2$, entries
-with $r^2<0.01$ are discarded, and the retained LD values are stored and applied
-as half-precision sparse tensors during fitting. Other model tensors default to
-single precision, with a command-line option to compare half-precision model
-tensors against the default while keeping LD half precision in both runs.
+LD is represented as chromosome-level sparse blocks rather than a single genome-wide matrix. Raw UK Biobank correlations are converted to $r^2$, entries with $r^2<0.01$ are discarded, and the retained LD values are stored and applied as half-precision sparse tensors during fitting. Other model tensors default to
+single precision, with a command-line option to compare half-precision model tensors against the default while keeping LD half precision in both runs.
 
-\section{Why chromosome-heldout CV was removed}
+\subsection{Cross-validation strategy}
 
-Leaving out an entire chromosome is not a valid penalty-selection scheme for the
-gene-indexed COMPASS parameter $B$. If chromosome 1 is held out, then most genes
-on chromosome 1 have no training annotations. Prediction on the held-out
-chromosome therefore relies on gene effects that were not estimable in the
-training set. This design can only evaluate whether a globally shared context
-profile transfers to unseen genes; it cannot evaluate whether estimated
-gene-level contributions generalize to independent regulatory elements for the
-same gene. The previously reported chromosome-heldout null result should
-therefore be treated as a diagnostic of an invalid validation split, not as an
-AD biological conclusion.
+Leaving out an entire chromosome is not a valid penalty-selection scheme for the gene-indexed COMPASS parameter $B$. If chromosome 1 is held out, then genes on chromosome 1 have no training annotations. Prediction on the held-out chromosome therefore relies on gene effects that were not estimable in the training set. 
 
-\section{CRE-structured CV}
+Our CV design therefore assigns fold labels to CRE groups rather than chromosomes. For each gene, CREs are sorted by genomic position after grouping nearby CREs into LD-distance clusters. Independent clusters for the same gene are assigned across folds. Variant-level fold labels are then inherited from the CRE groups they overlap; variants overlapping multiple conflicting folds are retained for training but are not used as validation rows. For a validation fold, the model is trained on all variants not assigned to that fold and evaluated on variants assigned to the held-out CRE fold.
 
-The revised validation design assigns fold labels to CRE groups rather than
-chromosomes. For each gene, CREs are sorted by genomic position after grouping
-nearby CREs into LD-distance clusters. Independent clusters for the same gene
-are assigned across folds. Variant-level fold labels are then inherited from the
-CRE groups they overlap; variants overlapping multiple conflicting folds are
-retained for training but are not used as validation rows. For a validation fold,
-the model is trained on all variants not assigned to that fold and evaluated on
-variants assigned to the held-out CRE fold.
-
-This design has the intended target: the model learns $B_{kl}$ from some
-regulatory elements for a gene and tests whether those estimates predict other,
-approximately LD-independent regulatory elements for the same gene. It also
-preserves genome-wide LD modeling because the held-out units are local CRE
+This design has the intended target: the model learns $B_{kl}$ from some CREs for a gene and tests whether those estimates predict summary statistics for variants in other, approximately LD-independent CREs for the same gene. It also preserves genome-wide LD modeling because the held-out units are local CRE
 clusters rather than whole chromosomes.
 
-\section{Implementation status}
+\subsection{Implementation status}
 
 The repository now downloads the public ABC table into
-\texttt{raw/abc/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz}
-and uses ABC annotations by default in \texttt{scripts/run.py}. Dataset caches
-store CRE fold labels alongside GWAS statistics, chromosome labels, and sample
-sizes. The row set is filtered to variants present in the UK Biobank LD
-metadata, and non-CRE rows are retained with zero annotations. The previous
-leave-one-chromosome CV code path has been removed from the fitting path;
-requesting CV now requires CRE fold labels in the dataset. The older top-eQTL
-annotation loader remains available for debugging, but it should be run with
-\texttt{--no-cv} unless a valid CRE fold structure is added.
-
-\section{Next analysis}
-
-The corrected AD analysis should be interpreted only after fitting the ABC-based
-design with CRE-structured lambda selection. The primary outputs will be global
-gene scores, biosample-specific gene scores, and ordered gene-set enrichment
-using the assayed genes as background. Any enrichment should be reported only
-from the CRE-validated lambda-selected fit; weaker penalties can be shown as
-sensitivity analyses but should not define discoveries.
+\texttt{raw/abc/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz} and uses ABC annotations by default in \texttt{scripts/run.py}. Dataset caches store CRE fold labels alongside GWAS statistics, chromosome labels, and sample
+sizes. The row set is filtered to variants present in the UK Biobank LD metadata, and non-CRE rows are retained with zero annotations. 
 
 \end{document}
