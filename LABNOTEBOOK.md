@@ -135,6 +135,10 @@
 - L40S int32 CSR smoke job `18709337` confirmed fp16 CSR sparse matmul and backward work with int32 `crow_indices` and `col_indices`.
 - Added int32 CUDA CSR indices for LD chunks and timing metadata for LD chunk conversion and eval/backward time.
 - Model-path L40S smoke job `18709338` completed with `ld_gpu_layout=csr`, `ld_index_dtype=int32`, and populated LD chunk timing fields.
+- Added `scripts/benchmark_ld_chunks.py` to benchmark cached chromosome LD row-chunk sizes on GPU.
+- On chromosome 22, chunk sizes 25M, 50M, 100M, and 200M processed 102,321,592 LD nonzeros with peak GPU memory from about 1.5 GB to 6.1 GB; 200M was fastest in this small chromosome benchmark.
+- On chromosome 6, chunk sizes 100M, 150M, and 200M processed 907,481,458 LD nonzeros with peak GPU memory about 6.0 GB, 8.9 GB, and 11.9 GB respectively; 150M had the fastest total time in the benchmark.
+- Updated the default `--ld-chunk-nnz` to 150M.
 
 ### Obsolete annotated-only setup test
 

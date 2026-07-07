@@ -11,7 +11,7 @@
 - [x] Test whether torch CUDA sparse CSR supports int32 `crow_indices` and `col_indices`: L40S smoke job `18709337` passed for fp16 CSR matmul and backward with int32 and int64 indices.
 - [x] Add an optional int32-index CUDA sparse conversion path and make it the default for LD: model-path L40S smoke job `18709338` reported `ld_index_dtype=int32`.
 - [x] Add lightweight per-fit timing metadata for LD chunk count and time spent in LD sparse matmul/backward: model-path L40S smoke job `18709338` reported chunk counts and conversion/eval-backward seconds.
-- [ ] Tune `--ld-chunk-nnz` using short GPU smoke jobs before changing full-fit defaults.
+- [x] Tune `--ld-chunk-nnz` using short GPU smoke jobs before changing full-fit defaults: chr22 and chr6 benchmarks support `150,000,000` as the default speed/memory tradeoff.
 
 ## Later optimization
 

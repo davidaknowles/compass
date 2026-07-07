@@ -317,7 +317,7 @@ def fit_nuclear_norm(
     svd_n_iter: int = 2,
     grad_clip: float | None = 1.0,
     model_dtype: str = "float32",
-    ld_chunk_nnz: int | None = 100_000_000,
+    ld_chunk_nnz: int | None = 150_000_000,
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit the convex non-negative nuclear-norm COMPASS relaxation."""
 
@@ -421,7 +421,7 @@ def fit_rank1_alt(
     constrain_w_simplex: bool = False,
     device: str = "cpu",
     model_dtype: str = "float32",
-    ld_chunk_nnz: int | None = 100_000_000,
+    ld_chunk_nnz: int | None = 150_000_000,
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit rank-1 B = s w' with alternating Torch updates for s and w."""
 
