@@ -3,7 +3,7 @@
 ## Current full jobs
 
 - [x] Cancel fp32 and fp16 model fits `18709275` and `18709276`: both were still in the unlogged CV loop after 3.6 days and could not finish before their time limits.
-- [ ] Submit the corrected full fp32 fit after the code review and final smoke test.
+- [x] Submit the corrected full fp32 masked-row CRE-CV fit as job `18756779`; it loaded the uncompressed cache and entered fold 0 cleanly.
 - [ ] Submit a matched fp16 comparison after the fp32 fit is healthy.
 
 ## Near-term engineering
