@@ -127,7 +127,7 @@
 - Updated the Torch fit loops so chromosome LD is no longer preloaded onto GPU for all chromosomes.
 - Each objective pass now converts only the active chromosome `R2` block to a torch fp16 sparse tensor, evaluates that block, immediately backpropagates its normalized loss contribution, then releases the block graph before moving to the next chromosome.
 - On CUDA, LD conversion uses torch sparse CSR to avoid COO `coalesce()` memory overhead; CPU smoke tests continue to use COO because fp16 CSR matmul is not implemented on CPU in the current Torch build.
-- CRE-fold CV subsetting now stores local chromosome row indices instead of eagerly copying full train/test LD matrices.
+- CRE-fold CV keeps the full chromosome LD operators in memory. Held-out CRE-fold rows have zero training weight, while their predictions are scored through the same full-LD GPU path; this avoids LD submatrix copies and preserves all variant rows for LD accounting.
 - Full streaming jobs `18708903` and `18708904` still failed on L40S: fp32 OOMed during backward for a whole chromosome block, and fp16 model dtype exposed that CUDA sparse COO annotation matmul is not implemented for half.
 - Added `--ld-chunk-nnz` so each chromosome is evaluated in row chunks while retaining chromosome-level CPU/cache organization.
 - Annotation sparse matmul now remains fp32; fp16 model dtype stores/updates model parameters in half but casts coefficients to fp32 for the annotation multiply, while LD remains fp16.
@@ -161,3 +161,4 @@
 - The residual non-mediated LD coefficient was previously initialized through `softplus(1e-8)`, which made its gradient effectively zero. It is now updated exactly as a non-negative weighted least-squares coordinate during each proximal iteration, without an additional genome-wide pass.
 - With the exact residual update and `lr=1e-8`, a 100-iteration full-genome trace reduced the data loss monotonically from 1.01523 to 0.77576 and reached relative coefficient change `9.86e-3`. The default tolerance is now `1e-2`, retaining 500 iterations as a safety cap.
 - A full iteration after fit setup takes about 6.4 s on the profiled GPU. CUDA sparse backward and fp16 CSR transfer are now the principal recurring costs; custom CUDA SpMV and fp8 LD are not justified by this profile.
+- A full five-fold, one-iteration CRE-CV smoke test completed without copying train/test LD matrices and included the final full-data step. The previous fold-subsetting implementation was removed after it exceeded host memory.

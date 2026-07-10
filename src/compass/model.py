@@ -15,7 +15,6 @@ class LdChromosomeBlock:
     chrom: int
     rows: np.ndarray
     R2: sp.csr_matrix
-    R2_local_rows: np.ndarray | None = None
 
 
 @dataclass
@@ -100,11 +99,7 @@ def _iter_ld_blocks(dataset: CompassDataset):
 
 
 def _materialize_block_r2(block: LdChromosomeBlock) -> sp.csr_matrix:
-    matrix = block.R2.tocsr()
-    if block.R2_local_rows is None:
-        return matrix
-    local_rows = np.asarray(block.R2_local_rows, dtype=np.int64)
-    return matrix[local_rows][:, local_rows].tocsr()
+    return block.R2.tocsr()
 
 
 def _ld_torch_layout(device: str) -> str:
@@ -124,6 +119,13 @@ def _prepare_fit_blocks(
     for block in _iter_ld_blocks(dataset):
         rows = np.asarray(block.rows, dtype=np.int64)
         R2_block = _materialize_block_r2(block)
+        if torch.device(device).type != "cuda" and R2_block.dtype == np.float16:
+            # SciPy cannot slice or multiply CSR matrices with float16 values.
+            # Keep the production CUDA path fp16, but make the CPU fallback valid.
+            R2_block = sp.csr_matrix(
+                (R2_block.data.astype(np.float32), R2_block.indices, R2_block.indptr),
+                shape=R2_block.shape,
+            )
         A_block = A[rows]
         chisq_block = torch.as_tensor(dataset.chisq[rows], dtype=torch.float32, device=device)
         weight_block = _weights(
@@ -140,24 +142,24 @@ def _prepare_fit_blocks(
                 "chrom": block.chrom,
                 "rows": rows,
                 "A_t": scipy_to_torch_sparse(A_block, device=device, dtype=torch.float32),
-                "R2_cpu": R2_block if block.R2_local_rows is None else None,
-                "R2_source": block,
+                "R2_cpu": R2_block,
                 "R2_nnz": int(R2_block.nnz),
                 "chisq": chisq_block,
                 "weight": weight_block,
                 "ld_score": torch.as_tensor(np.asarray(R2_block.sum(axis=1)).ravel(), dtype=torch.float32, device=device),
                 "n_samples": n_samples_block,
+                "cv_groups": (
+                    None
+                    if dataset.cv_groups is None
+                    else torch.as_tensor(dataset.cv_groups[rows], dtype=torch.int64, device=device)
+                ),
             }
         )
-        if block.R2_local_rows is not None:
-            del R2_block
     return block_specs
 
 
 def _block_r2_cpu(block_spec: dict) -> sp.csr_matrix:
-    if block_spec["R2_cpu"] is not None:
-        return block_spec["R2_cpu"]
-    return _materialize_block_r2(block_spec["R2_source"])
+    return block_spec["R2_cpu"]
 
 
 def _slice_vector(x: torch.Tensor, start: int, end: int) -> torch.Tensor:
@@ -230,6 +232,66 @@ def _backward_data_loss(
             del R2_t, pred, residual, loss_block, ld_term
         del R2_cpu
     return loss_value, tau_numerator, tau_denominator
+
+
+def _evaluate_fit_mse(
+    block_specs: list[dict],
+    B: np.ndarray,
+    tau: float,
+    device: str,
+    ld_chunk_nnz: int | None,
+    fold: int | None = None,
+) -> float:
+    """Evaluate a fitted model without rebuilding CRE-fold LD subsets."""
+
+    B_t = torch.as_tensor(B, dtype=torch.float32, device=device)
+    tau_t = torch.tensor(float(tau), dtype=torch.float32, device=device)
+    total_squared_error = 0.0
+    total_rows = 0
+    ld_layout = _ld_torch_layout(device)
+    ld_index_dtype = _ld_index_dtype(device)
+    with torch.no_grad():
+        for block in block_specs:
+            R2_cpu = _block_r2_cpu(block)
+            mediated = torch.sparse.mm(
+                block["A_t"], _flatten_B(B_t).to(block["A_t"].dtype).unsqueeze(1)
+            ).squeeze(1)
+            for start, end in iter_csr_row_ranges(R2_cpu, ld_chunk_nnz):
+                if ld_layout == "csr":
+                    R2_t = scipy_csr_rows_to_torch_sparse(
+                        R2_cpu,
+                        start,
+                        end,
+                        device=device,
+                        dtype=torch.float16,
+                        index_dtype=ld_index_dtype,
+                    )
+                else:
+                    R2_t = scipy_to_torch_sparse(
+                        R2_cpu[start:end],
+                        device=device,
+                        dtype=torch.float32,
+                        layout=ld_layout,
+                        index_dtype=ld_index_dtype,
+                    )
+                smoothed = torch.sparse.mm(R2_t, mediated.to(R2_t.dtype).unsqueeze(1)).squeeze(1).float()
+                pred = 1.0 + _slice_vector(block["n_samples"], start, end) * (
+                    smoothed + tau_t * block["ld_score"][start:end]
+                )
+                residual = block["chisq"][start:end] - pred
+                if fold is None:
+                    total_squared_error += float(torch.sum(residual.square()).cpu())
+                    total_rows += end - start
+                else:
+                    groups = block["cv_groups"]
+                    if groups is None:
+                        raise ValueError("CRE-structured CV requires cv_groups in prepared blocks")
+                    held_out = groups[start:end].eq(fold)
+                    total_squared_error += float(torch.sum(residual.square()[held_out]).cpu())
+                    total_rows += int(held_out.sum().cpu())
+                del R2_t, smoothed, pred, residual
+            del mediated
+    return total_squared_error / max(total_rows, 1)
 
 
 def _randomized_svd(
@@ -317,12 +379,13 @@ def fit_nuclear_norm(
     ld_chunk_nnz: int | None = 150_000_000,
     progress_every: int = 0,
     progress_label: str = "fit",
+    prepared_blocks: list[dict] | None = None,
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit the convex non-negative nuclear-norm COMPASS relaxation."""
 
     train_dtype = _torch_dtype(model_dtype)
-    block_specs = _prepare_fit_blocks(dataset, device)
-    total_den = int(sum(block["rows"].size for block in block_specs))
+    block_specs = _prepare_fit_blocks(dataset, device) if prepared_blocks is None else prepared_blocks
+    total_den = int(sum(int(torch.count_nonzero(block["weight"]).item()) for block in block_specs))
 
     if init_B is None:
         B = torch.zeros((n_genes, n_mechanisms), dtype=train_dtype, device=device, requires_grad=True)
@@ -547,45 +610,6 @@ def fit_rank1_alt(
     )
 
 
-def _subset_dataset(dataset: CompassDataset, keep: np.ndarray) -> CompassDataset:
-    keep = np.asarray(keep, dtype=bool)
-    n_samples = dataset.n_samples
-    if np.ndim(n_samples) > 0:
-        n_samples = np.asarray(n_samples)[keep]
-    ld_blocks = None
-    if dataset.ld_blocks is not None:
-        old_to_new = np.full(dataset.n_variants, -1, dtype=np.int64)
-        old_to_new[keep] = np.arange(int(keep.sum()), dtype=np.int64)
-        ld_blocks = []
-        for block in dataset.ld_blocks:
-            local_keep = keep[block.rows]
-            if not np.any(local_keep):
-                continue
-            new_rows = old_to_new[block.rows[local_keep]]
-            if block.R2_local_rows is None:
-                local_rows = np.flatnonzero(local_keep).astype(np.int64)
-            else:
-                local_rows = np.asarray(block.R2_local_rows, dtype=np.int64)[local_keep]
-            ld_blocks.append(
-                LdChromosomeBlock(
-                    chrom=block.chrom,
-                    rows=new_rows,
-                    R2=block.R2,
-                    R2_local_rows=local_rows,
-                )
-            )
-    return CompassDataset(
-        A=dataset.A[keep],
-        chisq=dataset.chisq[keep],
-        chrom=dataset.chrom[keep],
-        n_samples=n_samples,
-        R2=None if dataset.R2 is None else dataset.R2[keep][:, keep],
-        ld_blocks=ld_blocks,
-        sample_weight=None if dataset.sample_weight is None else dataset.sample_weight[keep],
-        cv_groups=None if dataset.cv_groups is None else dataset.cv_groups[keep],
-    )
-
-
 def grouped_variant_cv(
     dataset: CompassDataset,
     n_genes: int,
@@ -596,6 +620,7 @@ def grouped_variant_cv(
     lr: float = 1e-2,
     device: str = "cpu",
     folds: list[int] | None = None,
+    prepared_blocks: list[dict] | None = None,
     **kwargs,
 ) -> dict[float, float]:
     if dataset.cv_groups is None:
@@ -606,13 +631,32 @@ def grouped_variant_cv(
         raise ValueError("CRE-structured CV requires at least one non-negative CV group")
     scores: dict[float, list[float]] = {float(lam): [] for lam in lambdas}
     selected_folds = available if folds is None else [int(fold) for fold in folds]
+    block_specs = _prepare_fit_blocks(dataset, device) if prepared_blocks is None else prepared_blocks
     for fold in selected_folds:
-        train = groups != fold
-        test = groups == fold
-        if train.sum() == 0 or test.sum() == 0:
+        if not np.any(groups != fold) or not np.any(groups == fold):
             continue
-        train_ds = _subset_dataset(dataset, train)
-        test_ds = _subset_dataset(dataset, test)
+        train_blocks = []
+        for block in block_specs:
+            block_groups = block["cv_groups"]
+            if block_groups is None:
+                raise ValueError("CRE-structured CV requires cv_groups in prepared blocks")
+            train_weight = block["weight"] * block_groups.ne(fold).to(block["weight"].dtype)
+            train_blocks.append({**block, "weight": train_weight})
+        train_ds = None
+        if method == "rank1":
+            base_sample_weight = np.ones(dataset.n_variants, dtype=np.float32)
+            if dataset.sample_weight is not None:
+                base_sample_weight = np.asarray(dataset.sample_weight, dtype=np.float32)
+            train_ds = CompassDataset(
+                A=dataset.A,
+                chisq=dataset.chisq,
+                chrom=dataset.chrom,
+                n_samples=dataset.n_samples,
+                R2=dataset.R2,
+                ld_blocks=dataset.ld_blocks,
+                sample_weight=base_sample_weight * (groups != fold),
+                cv_groups=dataset.cv_groups,
+            )
         init_B = None
         init_tau = 1e-8
         init_s = None
@@ -620,7 +664,7 @@ def grouped_variant_cv(
         for lam in sorted([float(x) for x in lambdas], reverse=True):
             if method == "nuclear":
                 B, tau, _, _ = fit_nuclear_norm(
-                    train_ds,
+                    dataset,
                     n_genes,
                     n_mechanisms,
                     lam,
@@ -630,10 +674,12 @@ def grouped_variant_cv(
                     max_iter=max_iter,
                     device=device,
                     progress_label=f"cv-fold={fold}",
+                    prepared_blocks=train_blocks,
                     **kwargs,
                 )
                 init_B = B
             elif method == "rank1":
+                assert train_ds is not None
                 B, tau, _, _ = fit_rank1_alt(
                     train_ds,
                     n_genes,
@@ -654,23 +700,10 @@ def grouped_variant_cv(
             else:
                 raise ValueError(f"Unknown method: {method}")
             init_tau = tau
-            pred = _predict_numpy(test_ds, B, tau)
-            score = float(np.average((test_ds.chisq - pred) ** 2))
+            score = _evaluate_fit_mse(block_specs, B, tau, device, kwargs.get("ld_chunk_nnz"), fold=fold)
             scores[lam].append(score)
+        del train_blocks
     return {lam: float(np.mean(vals)) for lam, vals in scores.items() if vals}
-
-
-def _predict_numpy(dataset: CompassDataset, B: np.ndarray, tau: float) -> np.ndarray:
-    out = np.empty(dataset.n_variants, dtype=np.float32)
-    flat_B = B.reshape(-1)
-    for block in _iter_ld_blocks(dataset):
-        rows = np.asarray(block.rows, dtype=np.int64)
-        R2 = _materialize_block_r2(block).astype(np.float32, copy=False)
-        ld_score = np.asarray(R2.sum(axis=1)).ravel()
-        smoothed = R2 @ (dataset.A[rows] @ flat_B)
-        n_samples = np.asarray(dataset.n_samples)[rows] if np.ndim(dataset.n_samples) > 0 else dataset.n_samples
-        out[rows] = 1.0 + np.asarray(n_samples) * (np.asarray(smoothed).ravel() + tau * ld_score)
-    return out
 
 
 def fit_nuclear_norm_path(
@@ -682,7 +715,20 @@ def fit_nuclear_norm_path(
     **kwargs,
 ) -> FitResult:
     ordered = sorted([float(l) for l in lambdas], reverse=True)
-    cv_scores = grouped_variant_cv(dataset, n_genes, n_mechanisms, ordered, method="nuclear", **kwargs) if cv else None
+    prepared_blocks = _prepare_fit_blocks(dataset, kwargs.get("device", "cpu"))
+    cv_scores = (
+        grouped_variant_cv(
+            dataset,
+            n_genes,
+            n_mechanisms,
+            ordered,
+            method="nuclear",
+            prepared_blocks=prepared_blocks,
+            **kwargs,
+        )
+        if cv
+        else None
+    )
     best = min(cv_scores, key=cv_scores.get) if cv_scores else ordered[-1]
     init_B = None
     init_tau = 1e-8
@@ -693,6 +739,7 @@ def fit_nuclear_norm_path(
     metadata = {
         "cv_method": "cre_ld_group" if cv else None,
         "cv_folds": cv_folds,
+        "tau_update": "exact_weighted_least_squares",
     }
     B = None
     tau = init_tau
@@ -705,6 +752,7 @@ def fit_nuclear_norm_path(
             init_B=init_B,
             init_tau=init_tau,
             progress_label="full",
+            prepared_blocks=prepared_blocks,
             **kwargs,
         )
         losses_all.extend(losses)

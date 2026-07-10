@@ -19,4 +19,5 @@
 - [x] Remove per-chunk SciPy submatrix copies using parent-array CSR row views and preserve fp16 LD values on the host.
 - [x] Replace the frozen softplus residual coefficient with an exact non-negative weighted least-squares update per proximal iteration.
 - [x] Migrate the current chromosome LD cache to non-destructive uncompressed archives and prefer them through `manifest.uncompressed.json`.
+- [x] Replace copied train/test LD fold subsets with masked-row CRE CV over the full LD operator; the five-fold all-variant smoke test completed without OOM.
 - [x] Keep torch CSR rather than a custom CUDA kernel or fp8: after the zero-copy change, sparse backward is the largest recurring cost and transfer is second; neither justifies the added implementation risk yet.
