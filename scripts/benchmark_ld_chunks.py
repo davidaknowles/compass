@@ -11,8 +11,7 @@ import pandas as pd
 import scipy.sparse as sp
 import torch
 
-from compass.ld import scipy_to_torch_sparse
-from compass.model import _iter_csr_row_chunks
+from compass.ld import iter_csr_row_ranges, scipy_csr_rows_to_torch_sparse, scipy_to_torch_sparse
 
 
 DEFAULT_DATA_ROOT = Path("/gpfs/commons/home/daknowles/knowles_lab/data/compass")
@@ -23,7 +22,7 @@ def _load_csr_npz(path: Path) -> sp.csr_matrix:
         return sp.load_npz(path)
     arrays = np.load(path, allow_pickle=False)
     return sp.csr_matrix(
-        (arrays["data"].astype(np.float32), arrays["indices"], arrays["indptr"]),
+        (arrays["data"], arrays["indices"], arrays["indptr"]),
         shape=tuple(arrays["shape"]),
     )
 
@@ -73,17 +72,26 @@ def benchmark_chunk_size(
     chunks = 0
     processed_nnz = 0
     start_total = perf_counter()
-    for start, end, R2_chunk in _iter_csr_row_chunks(R2, chunk_nnz):
+    for start, end in iter_csr_row_ranges(R2, chunk_nnz):
         chunks += 1
-        processed_nnz += int(R2_chunk.nnz)
+        processed_nnz += int(R2.indptr[end] - R2.indptr[start])
         start_convert = perf_counter()
-        R2_t = scipy_to_torch_sparse(
-            R2_chunk,
-            device=device,
-            dtype=torch.float16,
-            layout="csr" if torch.device(device).type == "cuda" else "coo",
-            index_dtype=torch.int32 if torch.device(device).type == "cuda" else torch.long,
-        )
+        if torch.device(device).type == "cuda":
+            R2_t = scipy_csr_rows_to_torch_sparse(
+                R2,
+                start,
+                end,
+                device=device,
+                dtype=torch.float16,
+                index_dtype=torch.int32,
+            )
+        else:
+            R2_t = scipy_to_torch_sparse(
+                R2[start:end],
+                device=device,
+                dtype=torch.float32,
+                layout="coo",
+            )
         if torch.device(device).type == "cuda":
             torch.cuda.synchronize()
         convert_seconds += perf_counter() - start_convert
@@ -98,7 +106,7 @@ def benchmark_chunk_size(
         if torch.device(device).type == "cuda":
             torch.cuda.synchronize()
         eval_backward_seconds += perf_counter() - start_eval
-        del R2_t, mediated, smoothed, pred, residual, loss, R2_chunk
+        del R2_t, mediated, smoothed, pred, residual, loss
     if torch.device(device).type == "cuda":
         peak_mb = torch.cuda.max_memory_allocated() / 1024**2
     else:

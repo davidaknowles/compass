@@ -7,7 +7,7 @@ import numpy as np
 import scipy.sparse as sp
 import torch
 
-from .ld import scipy_to_torch_sparse
+from .ld import iter_csr_row_ranges, scipy_csr_rows_to_torch_sparse, scipy_to_torch_sparse
 
 
 @dataclass
@@ -75,7 +75,7 @@ def _torch_dtype(name: str) -> torch.dtype:
 
 def predict_factorized(
     B: torch.Tensor,
-    tau_raw: torch.Tensor,
+    tau: torch.Tensor,
     A_t: torch.Tensor,
     R2_t: torch.Tensor,
     ld_score: torch.Tensor,
@@ -83,8 +83,7 @@ def predict_factorized(
 ) -> torch.Tensor:
     mediated = torch.sparse.mm(A_t, _flatten_B(B).to(A_t.dtype).unsqueeze(1)).squeeze(1)
     smoothed = torch.sparse.mm(R2_t, mediated.to(R2_t.dtype).unsqueeze(1)).squeeze(1).float()
-    tau = torch.nn.functional.softplus(tau_raw).float()
-    return 1.0 + n_samples * (smoothed + tau * ld_score)
+    return 1.0 + n_samples * (smoothed + tau.float() * ld_score)
 
 
 def _iter_ld_blocks(dataset: CompassDataset):
@@ -116,11 +115,6 @@ def _ld_index_dtype(device: str):
     return torch.int32 if torch.device(device).type == "cuda" else torch.long
 
 
-def _clear_cuda_cache(device: str) -> None:
-    if torch.device(device).type == "cuda" and torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-
 def _prepare_fit_blocks(
     dataset: CompassDataset,
     device: str,
@@ -129,7 +123,7 @@ def _prepare_fit_blocks(
     block_specs = []
     for block in _iter_ld_blocks(dataset):
         rows = np.asarray(block.rows, dtype=np.int64)
-        R2_block = _materialize_block_r2(block).astype(np.float32, copy=False)
+        R2_block = _materialize_block_r2(block)
         A_block = A[rows]
         chisq_block = torch.as_tensor(dataset.chisq[rows], dtype=torch.float32, device=device)
         weight_block = _weights(
@@ -163,22 +157,7 @@ def _prepare_fit_blocks(
 def _block_r2_cpu(block_spec: dict) -> sp.csr_matrix:
     if block_spec["R2_cpu"] is not None:
         return block_spec["R2_cpu"]
-    return _materialize_block_r2(block_spec["R2_source"]).astype(np.float32, copy=False)
-
-
-def _iter_csr_row_chunks(matrix: sp.csr_matrix, max_nnz: int | None):
-    n_rows = matrix.shape[0]
-    if max_nnz is None or max_nnz <= 0 or matrix.nnz <= max_nnz:
-        yield 0, n_rows, matrix
-        return
-    indptr = matrix.indptr
-    start = 0
-    while start < n_rows:
-        target = int(indptr[start]) + int(max_nnz)
-        end = int(np.searchsorted(indptr, target, side="right") - 1)
-        end = max(start + 1, min(end, n_rows))
-        yield start, end, matrix[start:end]
-        start = end
+    return _materialize_block_r2(block_spec["R2_source"])
 
 
 def _slice_vector(x: torch.Tensor, start: int, end: int) -> torch.Tensor:
@@ -190,49 +169,67 @@ def _slice_vector(x: torch.Tensor, start: int, end: int) -> torch.Tensor:
 def _backward_data_loss(
     block_specs: list[dict],
     B: torch.Tensor,
-    tau_raw: torch.Tensor,
+    tau: torch.Tensor,
     device: str,
     total_den: int,
     ld_chunk_nnz: int | None,
     stats: dict[str, float],
-) -> float:
+) -> tuple[float, float, float]:
     loss_value = 0.0
+    tau_numerator = 0.0
+    tau_denominator = 0.0
     ld_layout = _ld_torch_layout(device)
     ld_index_dtype = _ld_index_dtype(device)
     for block in block_specs:
         R2_cpu = _block_r2_cpu(block)
-        for start, end, R2_chunk in _iter_csr_row_chunks(R2_cpu, ld_chunk_nnz):
+        for start, end in iter_csr_row_ranges(R2_cpu, ld_chunk_nnz):
             stats["ld_chunks"] += 1
-            stats["ld_chunk_nnz_total"] += int(R2_chunk.nnz)
+            stats["ld_chunk_nnz_total"] += int(R2_cpu.indptr[end] - R2_cpu.indptr[start])
             chunk_start = perf_counter()
-            R2_t = scipy_to_torch_sparse(
-                R2_chunk,
-                device=device,
-                dtype=torch.float16,
-                layout=ld_layout,
-                index_dtype=ld_index_dtype,
-            )
+            if ld_layout == "csr":
+                R2_t = scipy_csr_rows_to_torch_sparse(
+                    R2_cpu,
+                    start,
+                    end,
+                    device=device,
+                    dtype=torch.float16,
+                    index_dtype=ld_index_dtype,
+                )
+            else:
+                R2_t = scipy_to_torch_sparse(
+                    R2_cpu[start:end],
+                    device=device,
+                    dtype=torch.float32,
+                    layout=ld_layout,
+                    index_dtype=ld_index_dtype,
+                )
             stats["ld_sparse_convert_seconds"] += perf_counter() - chunk_start
             eval_start = perf_counter()
             pred = predict_factorized(
                 B,
-                tau_raw,
+                tau,
                 block["A_t"],
                 R2_t,
                 block["ld_score"][start:end],
                 _slice_vector(block["n_samples"], start, end),
             )
             residual = block["chisq"][start:end] - pred
-            loss_block = torch.sum(block["weight"][start:end] * residual.square()) / max(total_den, 1)
+            weight = block["weight"][start:end]
+            ld_term = _slice_vector(block["n_samples"], start, end) * block["ld_score"][start:end]
+            loss_block = torch.sum(weight * residual.square()) / max(total_den, 1)
             loss_value += float(loss_block.detach().cpu())
+            # The residual LD term is a non-negative scalar weighted least-squares
+            # coefficient. Accumulate its exact coordinate update while evaluating
+            # the data loss, so selecting tau requires no extra genome-wide pass.
+            tau_numerator += float(torch.sum(weight * ld_term * (residual + ld_term * tau)).detach().cpu())
+            tau_denominator += float(torch.sum(weight * ld_term.square()).detach().cpu())
             loss_block.backward()
             if torch.device(device).type == "cuda" and torch.cuda.is_available():
                 torch.cuda.synchronize()
             stats["ld_eval_backward_seconds"] += perf_counter() - eval_start
-            del R2_t, pred, residual, loss_block, R2_chunk
-            _clear_cuda_cache(device)
+            del R2_t, pred, residual, loss_block, ld_term
         del R2_cpu
-    return loss_value
+    return loss_value, tau_numerator, tau_denominator
 
 
 def _randomized_svd(
@@ -318,6 +315,8 @@ def fit_nuclear_norm(
     grad_clip: float | None = 1.0,
     model_dtype: str = "float32",
     ld_chunk_nnz: int | None = 150_000_000,
+    progress_every: int = 0,
+    progress_label: str = "fit",
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit the convex non-negative nuclear-norm COMPASS relaxation."""
 
@@ -329,7 +328,7 @@ def fit_nuclear_norm(
         B = torch.zeros((n_genes, n_mechanisms), dtype=train_dtype, device=device, requires_grad=True)
     else:
         B = torch.as_tensor(init_B, dtype=train_dtype, device=device).clone().requires_grad_(True)
-    tau_raw = torch.tensor(float(np.log(np.expm1(max(init_tau, 1e-12)))), dtype=train_dtype, device=device, requires_grad=True)
+    tau = torch.tensor(max(float(init_tau), 0.0), dtype=train_dtype, device=device)
 
     losses: list[float] = []
     start = perf_counter()
@@ -341,24 +340,23 @@ def fit_nuclear_norm(
     }
     best_loss = np.inf
     best_B = B.detach().clone()
-    best_tau_raw = tau_raw.detach().clone()
+    best_tau = tau.detach().clone()
     for it in range(max_iter):
         if B.grad is not None:
             B.grad.zero_()
-        if tau_raw.grad is not None:
-            tau_raw.grad.zero_()
-        loss_value = _backward_data_loss(block_specs, B, tau_raw, device, total_den, ld_chunk_nnz, ld_stats)
+        loss_value, tau_numerator, tau_denominator = _backward_data_loss(
+            block_specs, B, tau, device, total_den, ld_chunk_nnz, ld_stats
+        )
+        tau_next = max(0.0, tau_numerator / tau_denominator) if tau_denominator > 0 else 0.0
+        loss_value -= tau_denominator * (float(tau.detach().cpu()) - tau_next) ** 2 / max(total_den, 1)
         if np.isfinite(loss_value) and loss_value < best_loss:
             best_loss = loss_value
             best_B = B.detach().clone()
-            best_tau_raw = tau_raw.detach().clone()
+            best_tau = torch.as_tensor(tau_next, dtype=train_dtype, device=device)
         with torch.no_grad():
             b_grad = torch.nan_to_num(B.grad, nan=0.0, posinf=0.0, neginf=0.0)
             if grad_clip is not None:
                 b_grad = torch.clamp(b_grad, min=-grad_clip, max=grad_clip)
-            tau_grad = torch.nan_to_num(tau_raw.grad, nan=0.0, posinf=0.0, neginf=0.0)
-            if grad_clip is not None:
-                tau_grad = torch.clamp(tau_grad, min=-grad_clip, max=grad_clip)
             B_next = B - lr * b_grad
             B_next = nuclear_prox_nonnegative(
                 B_next.float(),
@@ -368,15 +366,21 @@ def fit_nuclear_norm(
                 svd_oversamples=svd_oversamples,
                 svd_n_iter=svd_n_iter,
             ).to(train_dtype)
-            tau_raw -= lr * tau_grad
+            tau.fill_(tau_next)
             delta = torch.linalg.norm(B_next - B) / (torch.linalg.norm(B) + 1e-8)
             B.copy_(B_next)
         losses.append(loss_value)
+        if progress_every and (it == 0 or (it + 1) % progress_every == 0):
+            print(
+                f"[fit] {progress_label} lambda={lambda_value:g} iteration={it + 1} "
+                f"loss={loss_value:.6g} relative_change={float(delta.detach().cpu()):.3g}",
+                flush=True,
+            )
         if it > 10 and float(delta.detach().cpu()) < tol:
             break
     with torch.no_grad():
         B.copy_(best_B)
-        tau_raw.copy_(best_tau_raw)
+        tau.copy_(best_tau)
     metadata = {
         "iterations": len(losses),
         "seconds": perf_counter() - start,
@@ -390,12 +394,13 @@ def fit_nuclear_norm(
         "svd_rank": svd_rank,
         "grad_clip": grad_clip,
         "best_loss": best_loss,
+        "tau_update": "exact_weighted_least_squares",
         "model_dtype": model_dtype,
         "ld_dtype": "float16",
     }
     return (
         B.detach().cpu().numpy(),
-        float(torch.nn.functional.softplus(tau_raw).detach().cpu()),
+        float(tau.detach().cpu()),
         losses,
         metadata,
     )
@@ -438,10 +443,10 @@ def fit_rank1_alt(
         w_raw0 = np.log(np.expm1(np.maximum(init_w, 1e-12)))
     s_raw = torch.as_tensor(s_raw0, dtype=train_dtype, device=device).clone().requires_grad_(True)
     w_raw = torch.as_tensor(w_raw0, dtype=train_dtype, device=device).clone().requires_grad_(True)
-    tau_raw = torch.tensor(float(np.log(np.expm1(max(init_tau, 1e-12)))), dtype=train_dtype, device=device, requires_grad=True)
+    tau = torch.tensor(max(float(init_tau), 0.0), dtype=train_dtype, device=device, requires_grad=True)
 
-    opt_s = torch.optim.Adam([s_raw, tau_raw], lr=lr)
-    opt_w = torch.optim.Adam([w_raw, tau_raw], lr=lr)
+    opt_s = torch.optim.Adam([s_raw, tau], lr=lr)
+    opt_w = torch.optim.Adam([w_raw, tau], lr=lr)
     losses: list[float] = []
     start = perf_counter()
     ld_stats = {
@@ -460,25 +465,35 @@ def fit_rank1_alt(
         ld_index_dtype = _ld_index_dtype(device)
         for block in block_specs:
             R2_cpu = _block_r2_cpu(block)
-            for start, end, R2_chunk in _iter_csr_row_chunks(R2_cpu, ld_chunk_nnz):
+            for start, end in iter_csr_row_ranges(R2_cpu, ld_chunk_nnz):
                 ld_stats["ld_chunks"] += 1
-                ld_stats["ld_chunk_nnz_total"] += int(R2_chunk.nnz)
+                ld_stats["ld_chunk_nnz_total"] += int(R2_cpu.indptr[end] - R2_cpu.indptr[start])
                 s = torch.nn.functional.softplus(s_raw)
                 w = _normalize_simplex(w_raw, constrain_w_simplex)
                 B = torch.outer(s, w)
                 chunk_start = perf_counter()
-                R2_t = scipy_to_torch_sparse(
-                    R2_chunk,
-                    device=device,
-                    dtype=torch.float16,
-                    layout=ld_layout,
-                    index_dtype=ld_index_dtype,
-                )
+                if ld_layout == "csr":
+                    R2_t = scipy_csr_rows_to_torch_sparse(
+                        R2_cpu,
+                        start,
+                        end,
+                        device=device,
+                        dtype=torch.float16,
+                        index_dtype=ld_index_dtype,
+                    )
+                else:
+                    R2_t = scipy_to_torch_sparse(
+                        R2_cpu[start:end],
+                        device=device,
+                        dtype=torch.float32,
+                        layout=ld_layout,
+                        index_dtype=ld_index_dtype,
+                    )
                 ld_stats["ld_sparse_convert_seconds"] += perf_counter() - chunk_start
                 eval_start = perf_counter()
                 pred = predict_factorized(
                     B,
-                    tau_raw,
+                    tau,
                     block["A_t"],
                     R2_t,
                     block["ld_score"][start:end],
@@ -491,8 +506,7 @@ def fit_rank1_alt(
                 if torch.device(device).type == "cuda" and torch.cuda.is_available():
                     torch.cuda.synchronize()
                 ld_stats["ld_eval_backward_seconds"] += perf_counter() - eval_start
-                del R2_t, pred, residual, loss_block, B, R2_chunk
-                _clear_cuda_cache(device)
+                del R2_t, pred, residual, loss_block, B
             del R2_cpu
         s = torch.nn.functional.softplus(s_raw)
         w = _normalize_simplex(w_raw, constrain_w_simplex)
@@ -500,6 +514,8 @@ def fit_rank1_alt(
         reg = lambda_value * torch.linalg.norm(B, ord="nuc")
         reg.backward()
         opt.step()
+        with torch.no_grad():
+            tau.clamp_(min=0.0)
         losses.append(data_loss + float(reg.detach().cpu()))
         with torch.no_grad():
             B_now = torch.outer(torch.nn.functional.softplus(s_raw), _normalize_simplex(w_raw, constrain_w_simplex))
@@ -525,7 +541,7 @@ def fit_rank1_alt(
     }
     return (
         B_final.detach().cpu().numpy(),
-        float(torch.nn.functional.softplus(tau_raw).detach().cpu()),
+        float(tau.detach().cpu()),
         losses,
         metadata,
     )
@@ -613,6 +629,7 @@ def grouped_variant_cv(
                     lr=lr,
                     max_iter=max_iter,
                     device=device,
+                    progress_label=f"cv-fold={fold}",
                     **kwargs,
                 )
                 init_B = B
@@ -681,7 +698,14 @@ def fit_nuclear_norm_path(
     tau = init_tau
     for lam in ordered:
         B, tau, losses, meta = fit_nuclear_norm(
-            dataset, n_genes, n_mechanisms, lam, init_B=init_B, init_tau=init_tau, **kwargs
+            dataset,
+            n_genes,
+            n_mechanisms,
+            lam,
+            init_B=init_B,
+            init_tau=init_tau,
+            progress_label="full",
+            **kwargs,
         )
         losses_all.extend(losses)
         metadata[lam] = meta

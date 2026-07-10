@@ -469,3 +469,56 @@ def scipy_to_torch_sparse(
             device=device,
         ).coalesce()
     raise ValueError(f"Unknown torch sparse layout: {layout}")
+
+
+def iter_csr_row_ranges(matrix: sp.csr_matrix, max_nnz: int | None):
+    """Yield CSR row ranges containing at most roughly ``max_nnz`` entries."""
+
+    csr = matrix.tocsr(copy=False)
+    n_rows = csr.shape[0]
+    if max_nnz is None or max_nnz <= 0 or csr.nnz <= max_nnz:
+        yield 0, n_rows
+        return
+    start = 0
+    while start < n_rows:
+        target = int(csr.indptr[start]) + int(max_nnz)
+        end = int(np.searchsorted(csr.indptr, target, side="right") - 1)
+        end = max(start + 1, min(end, n_rows))
+        yield start, end
+        start = end
+
+
+def scipy_csr_rows_to_torch_sparse(
+    matrix: sp.csr_matrix,
+    start: int,
+    end: int,
+    device: str = "cpu",
+    dtype=None,
+    index_dtype=None,
+):
+    """Transfer a CSR row range without materializing a SciPy submatrix.
+
+    CSR column indices and values are NumPy views into ``matrix``. Only the
+    short row-pointer array is copied and rebased for the sliced tensor.
+    """
+
+    import torch
+
+    if dtype is None:
+        dtype = torch.float32
+    if index_dtype is None:
+        index_dtype = torch.long
+    csr = matrix.tocsr(copy=False)
+    if not (0 <= start <= end <= csr.shape[0]):
+        raise ValueError(f"Invalid CSR row range [{start}, {end}) for shape {csr.shape}")
+    first_nnz = int(csr.indptr[start])
+    last_nnz = int(csr.indptr[end])
+    crow_indices = np.array(csr.indptr[start : end + 1], copy=True)
+    crow_indices -= first_nnz
+    return torch.sparse_csr_tensor(
+        torch.as_tensor(crow_indices, dtype=index_dtype, device=device),
+        torch.as_tensor(csr.indices[first_nnz:last_nnz], dtype=index_dtype, device=device),
+        torch.as_tensor(csr.data[first_nnz:last_nnz], dtype=dtype, device=device),
+        size=(end - start, csr.shape[1]),
+        device=device,
+    )

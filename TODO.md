@@ -2,9 +2,9 @@
 
 ## Current full jobs
 
-- [x] Monitor fp32 model fit job `18709275`: running in fit loop after cache load.
-- [x] Monitor fp16 model fit job `18709276`: running in fit loop after cache load.
-- [ ] Compare fp32 and fp16 fit outputs once both complete.
+- [x] Cancel fp32 and fp16 model fits `18709275` and `18709276`: both were still in the unlogged CV loop after 3.6 days and could not finish before their time limits.
+- [ ] Submit the corrected full fp32 fit after the code review and final smoke test.
+- [ ] Submit a matched fp16 comparison after the fp32 fit is healthy.
 
 ## Near-term engineering
 
@@ -15,6 +15,8 @@
 
 ## Later optimization
 
-- [ ] Profile full or representative chromosome chunks to identify whether runtime is LD SpMV, SVD/prox, CPU cache loading, or data transfer.
-- [ ] Consider a custom CUDA LD SpMV kernel only if torch/cuSPARSE CSR remains the bottleneck after int32 indices and chunk tuning.
-- [ ] Do not pursue fp8 LD values until profiling shows fp16 value bandwidth, rather than sparse indices or atomics, is the limiting factor.
+- [x] Profile representative and full-genome CUDA fits with cProfile: avoidable SciPy CSR row slicing dominated the old inner loop; CUDA sparse backward and CSR transfer are now the recurring costs.
+- [x] Remove per-chunk SciPy submatrix copies using parent-array CSR row views and preserve fp16 LD values on the host.
+- [x] Replace the frozen softplus residual coefficient with an exact non-negative weighted least-squares update per proximal iteration.
+- [x] Migrate the current chromosome LD cache to non-destructive uncompressed archives and prefer them through `manifest.uncompressed.json`.
+- [x] Keep torch CSR rather than a custom CUDA kernel or fp8: after the zero-copy change, sparse backward is the largest recurring cost and transfer is second; neither justifies the added implementation risk yet.

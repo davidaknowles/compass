@@ -146,7 +146,7 @@ fit = fit_nuclear_norm_path(
     lambdas=[1e3, 3e2, 1e2, 3e1, 1e1, 3, 1, 3e-1, 1e-1, 3e-2, 1e-2, 3e-3, 1e-3, 3e-4, 1e-4],
     cv=True,
     max_iter=200,
-    lr=1e-6,
+    lr=1e-8,
     device="cpu",
 )
 ```

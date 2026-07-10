@@ -136,7 +136,8 @@ def _dataset_cache_exists(paths: dict[str, Path]) -> bool:
         paths["ld_diagnostics"], ".pkl"
     ).exists()
     r2_exists = paths["R2"].exists() or (
-        paths["R2_dir"].exists() and (paths["R2_dir"] / "manifest.json").exists()
+        paths["R2_dir"].exists()
+        and any((paths["R2_dir"] / name).exists() for name in ("manifest.uncompressed.json", "manifest.json"))
     )
     return (
         paths["A"].exists()
@@ -148,13 +149,21 @@ def _dataset_cache_exists(paths: dict[str, Path]) -> bool:
     )
 
 
+def _ld_manifest_path(r2_dir: Path) -> Path:
+    for name in ("manifest.uncompressed.json", "manifest.json"):
+        path = r2_dir / name
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"No LD manifest found in {r2_dir}")
+
+
 def _load_dataset_cache(paths: dict[str, Path]):
     with _timed("load dataset cache"):
         A = sp.load_npz(paths["A"])
         R2 = sp.load_npz(paths["R2"]) if paths["R2"].exists() else None
         ld_blocks = None
         if R2 is None:
-            with open(paths["R2_dir"] / "manifest.json", encoding="utf-8") as handle:
+            with open(_ld_manifest_path(paths["R2_dir"]), encoding="utf-8") as handle:
                 manifest = json.load(handle)
             ld_blocks = [
                 LdChromosomeBlock(
@@ -183,7 +192,7 @@ def _load_dataset_cache(paths: dict[str, Path]):
 
 def _save_csr_npz(path: Path, matrix: sp.csr_matrix, data_dtype=np.float16) -> None:
     matrix = matrix.tocsr()
-    np.savez_compressed(
+    np.savez(
         path,
         data=matrix.data.astype(data_dtype),
         indices=matrix.indices,
@@ -198,7 +207,7 @@ def _load_csr_npz(path: Path) -> sp.csr_matrix:
     arrays = np.load(path, allow_pickle=False)
     return sp.csr_matrix(
         (
-            arrays["data"].astype(np.float32),
+            arrays["data"],
             arrays["indices"],
             arrays["indptr"],
         ),
@@ -270,8 +279,9 @@ def main() -> None:
         default=_parse_lambdas("1e3,3e2,1e2,3e1,1e1,3,1,3e-1,1e-1,3e-2,1e-2,3e-3,1e-3,3e-4,1e-4"),
     )
     parser.add_argument("--max-iter", type=int, default=500)
-    parser.add_argument("--lr", type=float, default=1e-6)
-    parser.add_argument("--tol", type=float, default=1e-6)
+    parser.add_argument("--progress-every", type=int, default=10)
+    parser.add_argument("--lr", type=float, default=1e-8)
+    parser.add_argument("--tol", type=float, default=1e-2)
     parser.add_argument("--no-cv", action="store_true")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--model-dtype", default="float32", choices=["float32", "float16"])
@@ -424,6 +434,7 @@ def main() -> None:
             cv=not args.no_cv,
             lr=args.lr,
             max_iter=args.max_iter,
+            progress_every=args.progress_every,
             tol=args.tol,
             device=device,
             model_dtype=args.model_dtype,

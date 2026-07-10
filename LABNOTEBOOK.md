@@ -150,3 +150,14 @@
 - Final cached ABC design: 171,788 variants, 67,196 gene-context parameters, 1,291,460 annotation nonzeros, and 40,455,388 LD nonzeros.
 - This cache is annotated-only and obsolete for inference.
 - A small synthetic smoke test exercised `fit_nuclear_norm_path` with `cv_method=cre_ld_group`; it produced fold scores for folds `[0, 1]` and selected among the provided lambdas.
+
+### GPU profiling and fit stabilization
+
+- Cancelled the previous fp32 and fp16 full fits after 3.6 days: both were still in an unlogged CV loop and would not finish within the requested allocation.
+- `cProfile` on a large chromosome showed that SciPy CSR row slicing and compressed-cache loading, rather than CUDA sparse kernels or SVD, dominated avoidable runtime.
+- CUDA LD chunks now use direct views of their parent CSR `indices` and `data` arrays; only the short rebased row-pointer array is copied. Host LD values remain fp16 until transfer.
+- On the representative large chromosome with 150M-nonzero chunks, this reduced a forward/backward pass from 4.14 s to 0.79 s at the same 8.9 GB peak GPU allocation.
+- The full-cache startup time fell from about 142 s to 30 s after adding uncompressed CSR archives and an opt-in manifest that leaves the original compressed cache untouched.
+- The residual non-mediated LD coefficient was previously initialized through `softplus(1e-8)`, which made its gradient effectively zero. It is now updated exactly as a non-negative weighted least-squares coordinate during each proximal iteration, without an additional genome-wide pass.
+- With the exact residual update and `lr=1e-8`, a 100-iteration full-genome trace reduced the data loss monotonically from 1.01523 to 0.77576 and reached relative coefficient change `9.86e-3`. The default tolerance is now `1e-2`, retaining 500 iterations as a safety cap.
+- A full iteration after fit setup takes about 6.4 s on the profiled GPU. CUDA sparse backward and fp16 CSR transfer are now the principal recurring costs; custom CUDA SpMV and fp8 LD are not justified by this profile.
