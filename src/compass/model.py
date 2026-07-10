@@ -60,6 +60,14 @@ def _flatten_B(B: torch.Tensor) -> torch.Tensor:
     return B.reshape(-1)
 
 
+def _relative_change(next_value: torch.Tensor, current_value: torch.Tensor) -> torch.Tensor:
+    """Compute a stable relative update norm even when model parameters are fp16."""
+
+    return torch.linalg.vector_norm((next_value - current_value).float()) / (
+        torch.linalg.vector_norm(current_value.float()) + 1e-8
+    )
+
+
 def _samples_tensor(n_samples: float | np.ndarray, device: str) -> torch.Tensor:
     return torch.as_tensor(n_samples, dtype=torch.float32, device=device)
 
@@ -69,6 +77,8 @@ def _torch_dtype(name: str) -> torch.dtype:
         return torch.float32
     if name == "float16":
         return torch.float16
+    if name == "bfloat16":
+        return torch.bfloat16
     raise ValueError(f"Unknown dtype: {name}")
 
 
@@ -380,6 +390,8 @@ def fit_nuclear_norm(
     progress_every: int = 0,
     progress_label: str = "fit",
     prepared_blocks: list[dict] | None = None,
+    objective_improve_tol: float = 1e-6,
+    stagnation_patience: int = 25,
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit the convex non-negative nuclear-norm COMPASS relaxation."""
 
@@ -401,21 +413,27 @@ def fit_nuclear_norm(
         "ld_sparse_convert_seconds": 0.0,
         "ld_eval_backward_seconds": 0.0,
     }
-    best_loss = np.inf
+    best_objective = np.inf
     best_B = B.detach().clone()
     best_tau = tau.detach().clone()
+    stalled_iterations = 0
     for it in range(max_iter):
         if B.grad is not None:
             B.grad.zero_()
-        loss_value, tau_numerator, tau_denominator = _backward_data_loss(
+        data_loss, tau_numerator, tau_denominator = _backward_data_loss(
             block_specs, B, tau, device, total_den, ld_chunk_nnz, ld_stats
         )
         tau_next = max(0.0, tau_numerator / tau_denominator) if tau_denominator > 0 else 0.0
-        loss_value -= tau_denominator * (float(tau.detach().cpu()) - tau_next) ** 2 / max(total_den, 1)
-        if np.isfinite(loss_value) and loss_value < best_loss:
-            best_loss = loss_value
+        data_loss -= tau_denominator * (float(tau.detach().cpu()) - tau_next) ** 2 / max(total_den, 1)
+        regularization = float(lambda_value * torch.linalg.matrix_norm(B.float(), ord="nuc").detach().cpu())
+        objective = data_loss + regularization
+        if np.isfinite(objective) and objective < best_objective - objective_improve_tol:
+            best_objective = objective
             best_B = B.detach().clone()
             best_tau = torch.as_tensor(tau_next, dtype=train_dtype, device=device)
+            stalled_iterations = 0
+        else:
+            stalled_iterations += 1
         with torch.no_grad():
             b_grad = torch.nan_to_num(B.grad, nan=0.0, posinf=0.0, neginf=0.0)
             if grad_clip is not None:
@@ -430,16 +448,17 @@ def fit_nuclear_norm(
                 svd_n_iter=svd_n_iter,
             ).to(train_dtype)
             tau.fill_(tau_next)
-            delta = torch.linalg.norm(B_next - B) / (torch.linalg.norm(B) + 1e-8)
+            delta = _relative_change(B_next, B)
             B.copy_(B_next)
-        losses.append(loss_value)
+        losses.append(objective)
         if progress_every and (it == 0 or (it + 1) % progress_every == 0):
             print(
                 f"[fit] {progress_label} lambda={lambda_value:g} iteration={it + 1} "
-                f"loss={loss_value:.6g} relative_change={float(delta.detach().cpu()):.3g}",
+                f"objective={objective:.6g} relative_change={float(delta.detach().cpu()):.3g} "
+                f"stalled={stalled_iterations}",
                 flush=True,
             )
-        if it > 10 and float(delta.detach().cpu()) < tol:
+        if it > 10 and (float(delta.detach().cpu()) < tol or stalled_iterations >= stagnation_patience):
             break
     with torch.no_grad():
         B.copy_(best_B)
@@ -456,13 +475,15 @@ def fit_nuclear_norm(
         "svd_method": svd_method,
         "svd_rank": svd_rank,
         "grad_clip": grad_clip,
-        "best_loss": best_loss,
+        "best_objective": best_objective,
         "tau_update": "exact_weighted_least_squares",
+        "objective_improve_tol": objective_improve_tol,
+        "stagnation_patience": stagnation_patience,
         "model_dtype": model_dtype,
         "ld_dtype": "float16",
     }
     return (
-        B.detach().cpu().numpy(),
+        B.detach().float().cpu().numpy(),
         float(tau.detach().cpu()),
         losses,
         metadata,
@@ -583,7 +604,7 @@ def fit_rank1_alt(
         with torch.no_grad():
             B_now = torch.outer(torch.nn.functional.softplus(s_raw), _normalize_simplex(w_raw, constrain_w_simplex))
             if last_B is not None:
-                delta = torch.linalg.norm(B_now - last_B) / (torch.linalg.norm(last_B) + 1e-8)
+                delta = _relative_change(B_now, last_B)
                 if it > 20 and float(delta.detach().cpu()) < tol:
                     break
             last_B = B_now.detach().clone()
@@ -603,7 +624,7 @@ def fit_rank1_alt(
         "ld_dtype": "float16",
     }
     return (
-        B_final.detach().cpu().numpy(),
+        B_final.detach().float().cpu().numpy(),
         float(tau.detach().cpu()),
         losses,
         metadata,

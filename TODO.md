@@ -3,8 +3,10 @@
 ## Current full jobs
 
 - [x] Cancel fp32 and fp16 model fits `18709275` and `18709276`: both were still in the unlogged CV loop after 3.6 days and could not finish before their time limits.
-- [x] Submit the corrected full fp32 masked-row CRE-CV fit as job `18756779`; it loaded the uncompressed cache and entered fold 0 cleanly.
-- [x] Submit matched fp16 model-parameter fit `18757013`; LD remains fp16 in both this and the fp32 comparison run.
+- [x] Cancel pre-objective-stop fp32 job `18756779`: it was spending 500 iterations on high-lambda plateaus.
+- [x] Cancel fp16 job `18757013`: fp16 model-state underflow caused a non-finite convergence metric at high lambda.
+- [ ] Submit the validated BF16 masked-row CRE-CV fit with penalized-objective plateau stopping.
+- [ ] Compare the completed BF16 fit against a corrected fp32 rerun if model precision materially affects selected lambda or held-out loss.
 
 ## Near-term engineering
 

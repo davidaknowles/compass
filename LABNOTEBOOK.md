@@ -162,3 +162,7 @@
 - With the exact residual update and `lr=1e-8`, a 100-iteration full-genome trace reduced the data loss monotonically from 1.01523 to 0.77576 and reached relative coefficient change `9.86e-3`. The default tolerance is now `1e-2`, retaining 500 iterations as a safety cap.
 - A full iteration after fit setup takes about 6.4 s on the profiled GPU. CUDA sparse backward and fp16 CSR transfer are now the principal recurring costs; custom CUDA SpMV and fp8 LD are not justified by this profile.
 - A full five-fold, one-iteration CRE-CV smoke test completed without copying train/test LD matrices and included the final full-data step. The previous fold-subsetting implementation was removed after it exceeded host memory.
+- FP16 model parameters are not suitable for this path: at `lambda=100`, fp16 quantization immediately selected an all-zero coefficient matrix, while BF16 followed the same nonzero trajectory as fp32. LD values remain fp16 for every model dtype.
+- Added `bfloat16` as a model-parameter option. BF16 outputs are converted to fp32 only at the NumPy result boundary.
+- Convergence norms are now evaluated in fp32 so a zero fp16 coefficient matrix does not produce `0/0` from an underflowed epsilon.
+- Fit selection and plateau stopping now use the full penalized objective (weighted data loss plus nuclear-norm penalty), not data loss alone. A BF16 `lambda=100` trace reached the plateau stop at iteration 40 rather than the previous 500-step cap.

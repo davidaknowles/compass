@@ -284,7 +284,7 @@ def main() -> None:
     parser.add_argument("--tol", type=float, default=1e-2)
     parser.add_argument("--no-cv", action="store_true")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    parser.add_argument("--model-dtype", default="float32", choices=["float32", "float16"])
+    parser.add_argument("--model-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
     parser.add_argument("--svd-method", default="auto", choices=["auto", "exact", "randomized"])
     parser.add_argument("--svd-rank", type=int, default=None)
     parser.add_argument("--svd-oversamples", type=int, default=5)
