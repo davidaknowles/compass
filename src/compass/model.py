@@ -27,6 +27,7 @@ class CompassDataset:
     ld_blocks: list[LdChromosomeBlock] | None = None
     sample_weight: np.ndarray | None = None
     cv_groups: np.ndarray | None = None
+    cv_score_groups: np.ndarray | None = None
 
     @property
     def n_variants(self) -> int:
@@ -163,6 +164,11 @@ def _prepare_fit_blocks(
                     if dataset.cv_groups is None
                     else torch.as_tensor(dataset.cv_groups[rows], dtype=torch.int64, device=device)
                 ),
+                "cv_score_groups": (
+                    None
+                    if dataset.cv_score_groups is None
+                    else torch.as_tensor(dataset.cv_score_groups[rows], dtype=torch.int64, device=device)
+                ),
             }
         )
     return block_specs
@@ -252,7 +258,7 @@ def _evaluate_fit_mse(
     ld_chunk_nnz: int | None,
     fold: int | None = None,
 ) -> float:
-    """Evaluate a fitted model without rebuilding CRE-fold LD subsets."""
+    """Evaluate an LD-component fold without rebuilding LD subsets."""
 
     B_t = torch.as_tensor(B, dtype=torch.float32, device=device)
     tau_t = torch.tensor(float(tau), dtype=torch.float32, device=device)
@@ -293,10 +299,10 @@ def _evaluate_fit_mse(
                     total_squared_error += float(torch.sum(residual.square()).cpu())
                     total_rows += end - start
                 else:
-                    groups = block["cv_groups"]
-                    if groups is None:
-                        raise ValueError("CRE-structured CV requires cv_groups in prepared blocks")
-                    held_out = groups[start:end].eq(fold)
+                    score_groups = block["cv_score_groups"]
+                    if score_groups is None:
+                        raise ValueError("LD-component CV requires cv_score_groups in prepared blocks")
+                    held_out = score_groups[start:end].eq(fold)
                     total_squared_error += float(torch.sum(residual.square()[held_out]).cpu())
                     total_rows += int(held_out.sum().cpu())
                 del R2_t, smoothed, pred, residual
@@ -647,11 +653,13 @@ def grouped_variant_cv(
     **kwargs,
 ) -> dict[float, float]:
     if dataset.cv_groups is None:
-        raise ValueError("CRE-structured CV requires dataset.cv_groups")
+        raise ValueError("LD-component CV requires dataset.cv_groups")
+    if dataset.cv_score_groups is None:
+        raise ValueError("LD-component CV requires dataset.cv_score_groups")
     groups = np.asarray(dataset.cv_groups)
     available = sorted(int(x) for x in np.unique(groups) if int(x) >= 0)
     if not available:
-        raise ValueError("CRE-structured CV requires at least one non-negative CV group")
+        raise ValueError("LD-component CV requires at least one non-negative CV group")
     if max_lambda_extensions < 0:
         raise ValueError("max_lambda_extensions must be non-negative")
     if lambda_extension_factor <= 1.0:
@@ -668,7 +676,7 @@ def grouped_variant_cv(
         for block in block_specs:
             block_groups = block["cv_groups"]
             if block_groups is None:
-                raise ValueError("CRE-structured CV requires cv_groups in prepared blocks")
+                raise ValueError("LD-component CV requires cv_groups in prepared blocks")
             train_weight = block["weight"] * block_groups.ne(fold).to(block["weight"].dtype)
             train_blocks.append({**block, "weight": train_weight})
         train_ds = None
@@ -685,6 +693,7 @@ def grouped_variant_cv(
                 ld_blocks=dataset.ld_blocks,
                 sample_weight=base_sample_weight * (groups != fold),
                 cv_groups=dataset.cv_groups,
+                cv_score_groups=dataset.cv_score_groups,
             )
         init_B = None
         init_tau = 1e-8
@@ -757,7 +766,7 @@ def grouped_variant_cv(
             for block in block_specs:
                 block_groups = block["cv_groups"]
                 if block_groups is None:
-                    raise ValueError("CRE-structured CV requires cv_groups in prepared blocks")
+                    raise ValueError("LD-component CV requires cv_groups in prepared blocks")
                 train_weight = block["weight"] * block_groups.ne(fold).to(block["weight"].dtype)
                 train_blocks.append({**block, "weight": train_weight})
             init_B, init_tau = fold_states[fold]
@@ -820,7 +829,7 @@ def fit_nuclear_norm_path(
     if cv and dataset.cv_groups is not None:
         cv_folds = sorted(int(x) for x in np.unique(dataset.cv_groups) if int(x) >= 0)
     metadata = {
-        "cv_method": "cre_ld_group" if cv else None,
+        "cv_method": "ld_component" if cv else None,
         "cv_folds": cv_folds,
         "tau_update": "exact_weighted_least_squares",
         "lambda_extensions": max(0, len(ordered) - len({float(lam) for lam in lambdas})),
@@ -869,7 +878,7 @@ def fit_rank1_path(
     if cv and dataset.cv_groups is not None:
         cv_folds = sorted(int(x) for x in np.unique(dataset.cv_groups) if int(x) >= 0)
     metadata = {
-        "cv_method": "cre_ld_group" if cv else None,
+        "cv_method": "ld_component" if cv else None,
         "cv_folds": cv_folds,
     }
     B = None

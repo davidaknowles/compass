@@ -143,7 +143,7 @@ This algorithm converges to the global optimal modular architecture, avoiding no
 
 Leaving out an entire chromosome is not a valid penalty-selection scheme for determining $\lambda$. For example, if chromosome 1 is held out, then genes on chromosome 1 have no training annotations. Prediction on the held-out chromosome therefore relies on gene effects that were not estimable in the training set.
 
-We therefore propose the global, LD-aware procedure in Algorithm~\ref{alg:cre-cv}. The essential change is to define folds for genomic regions before considering genes. We construct a graph on variants, joining variants whose reference-panel LD exceeds a threshold $r_{jm}^2\ge\rho_{\mathrm{CV}}$, and use its connected components as indivisible holdout units. Each component receives one genome-wide fold label, so the same fold has the same meaning for every gene and a variant linked to multiple genes cannot receive conflicting labels. Components are distributed across folds to balance the number of regression rows and, where possible, to place different components linked to the same gene in different folds.
+We therefore use the global, LD-aware procedure in Algorithm~\ref{alg:cre-cv}. The essential change is to define folds for genomic regions before considering genes. We construct a graph on variants, joining variants whose reference-panel LD exceeds a threshold $r_{jm}^2\ge\rho_{\mathrm{CV}}$, and use its connected components as indivisible holdout units. Each component receives one genome-wide fold label, so the same fold has the same meaning for every gene and a variant linked to multiple genes cannot receive conflicting labels. Components are distributed across folds to balance the number of regression rows and, where possible, to place different components linked to the same gene in different folds.
 
 Let $\mathcal{C}$ denote the set of CRE--gene links, and write $j\in c$ when variant $j$ lies in CRE $c$. After the LD components have been assigned labels $z_q$, define
 \begin{equation}
@@ -212,7 +212,7 @@ For Alzheimer disease (AD), the default run uses the brain-labelled biosamples a
 \end{sloppypar}
 
 The implementation reads the ABC table in chunks, intersects each CRE interval with GWAS variants, and emits sparse variant-gene-context triples whose values are ABC scores. The regression row universe is not restricted to ABC-overlapping
-variants. Instead, COMPASS uses all GWAS variants represented in the UK Biobank LD reference panel. Variants outside ABC CREs have all-zero annotation rows but remain in the regression so they contribute to LD tagging and the residual non-ABC-mediated LD-score term. In the proposed cross-validation scheme, the same reference panel defines global LD components shared by all genes.
+variants. Instead, COMPASS uses all GWAS variants represented in the UK Biobank LD reference panel. Variants outside ABC CREs have all-zero annotation rows but remain in the regression so they contribute to LD tagging and the residual non-ABC-mediated LD-score term. The same reference panel defines global LD components shared by all genes for cross-validation.
 
 LD is represented as chromosome-level sparse blocks rather than a single genome-wide matrix. Raw UK Biobank correlations are converted to $r^2$, entries with $r^2<0.01$ are discarded, and the retained LD values are stored and applied as half-precision sparse tensors during fitting. Other model tensors default to
 single precision, with a command-line option to compare half-precision model tensors against the default while keeping LD half precision in both runs.
@@ -220,7 +220,6 @@ single precision, with a command-line option to compare half-precision model ten
 \subsection{Implementation status}
 
 The repository now downloads the public ABC table into
-\path{raw/abc/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz} and uses ABC annotations by default in \texttt{scripts/run.py}. Dataset caches store CRE fold labels alongside GWAS statistics, chromosome labels, and sample
-sizes. The row set is filtered to variants present in the UK Biobank LD metadata, and non-CRE rows are retained with zero annotations. The global LD-component construction in Algorithm~\ref{alg:cre-cv} is a proposed replacement for the current per-gene, distance-binned fold labels and is not yet implemented.
+\path{raw/abc/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz} and uses ABC annotations by default in \texttt{scripts/run.py}. The row set is filtered to variants present in the UK Biobank LD metadata, and non-CRE rows are retained with zero annotations. For the default ten-fold CV, the implementation constructs chromosome-local connected components at $\rho_{\mathrm{CV}}=0.01$ directly from cached sparse LD blocks, assigns each component one global fold, and removes every row in that component from the corresponding training loss. Validation scores use only held-out annotated rows linked to genes that also have annotated training components.
 
 \end{document}

@@ -162,8 +162,6 @@ def load_abc_annotations(
     min_score: float = 0.015,
     cell_types: str | Iterable[str] | None = None,
     add_intercept: bool = True,
-    n_folds: int = 5,
-    ld_gap: int = 1_000_000,
     chunksize: int = 200_000,
 ) -> AnnotationData:
     """Load public ABC enhancer-gene links as sparse variant-gene annotations.
@@ -172,15 +170,11 @@ def load_abc_annotations(
     fall inside an ABC candidate regulatory element (CRE) receive sparse
     CRE-gene-context annotations; other variants remain as all-zero rows so LD
     tagging and residual LD-score regression still use the genome-wide row set.
-    CRE cross-validation groups are assigned within each gene after collapsing
-    nearby CREs into coarse LD-distance clusters.
+    Cross-validation groups are assigned later from global LD components after
+    the complete all-variant chromosome LD representation has been assembled.
     """
 
     abc_path = Path(abc_path).expanduser()
-    if n_folds < 2:
-        raise ValueError("n_folds must be at least 2 for CRE-structured CV")
-    if ld_gap <= 0:
-        raise ValueError("ld_gap must be positive")
     if "chrom" not in gwas.columns or "pos" not in gwas.columns:
         raise ValueError("ABC annotations require GWAS chromosome and position columns")
 
@@ -212,9 +206,7 @@ def load_abc_annotations(
     if add_intercept:
         mechanism_to_idx["intercept"] = 0
         mechanisms.append("intercept")
-    cluster_fold: dict[tuple[int, int, int], int] = {}
-    gene_clusters: dict[int, set[tuple[int, int]]] = {}
-    raw_records: list[tuple[str, int, int, float, int]] = []
+    raw_records: list[tuple[str, int, int, float]] = []
     usecols = ["chr", "start", "end", "TargetGene", score_column, "CellType"]
 
     compression = "gzip" if abc_path.suffix == ".gz" else None
@@ -250,42 +242,26 @@ def load_abc_annotations(
             hi = int(np.searchsorted(positions, int(row.end), side="right"))
             if hi <= lo:
                 continue
-            cluster = int(((int(row.start) + int(row.end)) // 2) // ld_gap)
-            gene_clusters.setdefault(gene_idx, set()).add((chrom, cluster))
             raw_records.extend(
-                (str(variant_id), gene_idx, mechanism_idx, float(row.score), chrom * 10_000_000 + cluster)
+                (str(variant_id), gene_idx, mechanism_idx, float(row.score))
                 for variant_id in variant_ids[lo:hi]
             )
             if add_intercept:
                 raw_records.extend(
-                    (str(variant_id), gene_idx, mechanism_to_idx["intercept"], 1.0, chrom * 10_000_000 + cluster)
+                    (str(variant_id), gene_idx, mechanism_to_idx["intercept"], 1.0)
                     for variant_id in variant_ids[lo:hi]
-            )
+                )
 
     if not raw_records:
         raise ValueError(f"No ABC CREs in {abc_path} overlapped GWAS variants")
-
-    for gene_idx, clusters in gene_clusters.items():
-        for offset, (chrom, cluster) in enumerate(sorted(clusters)):
-            cluster_fold[(gene_idx, chrom * 10_000_000 + cluster)] = offset % n_folds
 
     variants = gwas_variants[["variant_id", "chrom", "pos", "MarkerID"]].copy()
     variants = variants.sort_values(["chrom", "pos", "variant_id"]).reset_index(drop=True)
     variants["variant_idx"] = np.arange(variants.shape[0], dtype=np.int64)
     variant_to_idx = dict(zip(variants["variant_id"].astype(str), variants["variant_idx"]))
 
-    triples = pd.DataFrame(raw_records, columns=["variant_id", "gene_idx", "mechanism_idx", "value", "cluster_key"])
+    triples = pd.DataFrame(raw_records, columns=["variant_id", "gene_idx", "mechanism_idx", "value"])
     triples["variant_idx"] = triples["variant_id"].map(variant_to_idx).astype(np.int64)
-    triples["cre_fold"] = [
-        cluster_fold.get((int(gene_idx), int(cluster_key)), -1)
-        for gene_idx, cluster_key in zip(triples["gene_idx"], triples["cluster_key"])
-    ]
-    fold_sets = triples.groupby("variant_idx")["cre_fold"].agg(lambda x: set(int(v) for v in x if int(v) >= 0))
-    variant_folds = np.full(variants.shape[0], -1, dtype=np.int64)
-    for variant_idx, folds in fold_sets.items():
-        if len(folds) == 1:
-            variant_folds[int(variant_idx)] = next(iter(folds))
-    variants["cv_group"] = variant_folds
     triples = (
         triples[["variant_idx", "gene_idx", "mechanism_idx", "value"]]
         .groupby(["variant_idx", "gene_idx", "mechanism_idx"], as_index=False)["value"]

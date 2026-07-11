@@ -74,10 +74,10 @@
 
 - `src/compass/data.py::load_abc_annotations` intersects GWAS variants with ABC CRE intervals.
 - Annotation values are ABC scores for variant-overlapping CRE-gene-biosample links.
-- Nearby CREs for the same gene are collapsed into coarse LD-distance clusters using `--cre-ld-gap`, default `1,000,000` bp.
-- CRE clusters for the same gene are assigned across `--cre-folds`, default `5`.
-- Variant rows inherit a CRE fold when their overlapping CRE-gene links agree; ambiguous variants are allowed in training but not used as held-out validation rows.
-- `src/compass/model.py` now uses grouped variant CV (`cv_method=cre_ld_group`) and no longer calls chromosome-heldout CV from the fit path.
+- Global UK Biobank LD components at `r2 >= 0.01` are assigned to ten folds while balancing all regression rows and spreading a gene's components across folds.
+- Every variant row inherits its component fold and is excluded from that fold's training loss; non-CRE rows therefore cannot leak correlated GWAS signal across the split.
+- Only held-out CRE rows with at least one linked gene represented in a training component are scored. Unsupported gene effects remain zero in the fold fit, which restricts the mediated prediction to supported genes.
+- `src/compass/model.py` uses this global component CV (`cv_method=ld_component`) and no longer calls chromosome-heldout CV from the fit path.
 
 ### Default AD ABC contexts
 
@@ -149,7 +149,7 @@
 - LD assembly over 910 blocks took about 1933 seconds with 8 jobs.
 - Final cached ABC design: 171,788 variants, 67,196 gene-context parameters, 1,291,460 annotation nonzeros, and 40,455,388 LD nonzeros.
 - This cache is annotated-only and obsolete for inference.
-- A small synthetic smoke test exercised `fit_nuclear_norm_path` with `cv_method=cre_ld_group`; it produced fold scores for folds `[0, 1]` and selected among the provided lambdas.
+- A small synthetic smoke test exercised the superseded per-gene fold scheme. It is retained only as historical validation of the previous implementation.
 
 ### GPU profiling and fit stabilization
 
@@ -185,5 +185,12 @@
 
 ### Consequence for CV
 
-- `r2 >= 0.01` is a viable candidate for global LD-component CV: it preserves separation for every cached LD edge while leaving thousands of indivisible units for five-fold balancing.
-- The current per-gene, distance-binned CRE folds remain in code only until the selected `rho_CV` is wired into the global component fold builder.
+- `r2 >= 0.01` is a viable candidate for global LD-component CV: it preserves separation for every cached LD edge while leaving thousands of indivisible units for ten-fold balancing.
+- The selected implementation uses ten folds at `r2 >= 0.01`; the per-gene, distance-binned CRE-fold code has been removed.
+
+### Ten-fold implementation validation
+
+- `make_ld_component_cv_groups` assigns every all-variant regression row to one chromosome-local LD component, then greedily balances components across ten global folds while spreading components linked to the same gene.
+- The full-cache setup test completed successfully with 3,354 components, a largest component of 34,901 variants, and fold row totals of 1,236,231 or 1,236,232 each.
+- There are 104,411 held-out CRE scoring rows after requiring at least one linked gene to have an annotation in another fold. The ten fold-specific score counts range from 8,975 to 11,558.
+- Cache loading took 170 seconds and component/fold construction took 269 seconds on the validation CPU allocation, with approximately 75 GB peak resident memory.

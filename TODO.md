@@ -28,4 +28,4 @@
 ## LD-Component Cross-Validation
 
 - [x] Measure connected components across `r2` thresholds `0.01, 0.015, 0.02, 0.03, 0.05, 0.075, 0.10` from the cached all-variant LD graph. The full sweep completed in 368 seconds with 19.5 GB peak RSS.
-- [ ] Select `rho_CV` and replace distance-binned, per-gene CRE folds with global LD-component fold labels. At `r2 >= 0.01`, 3,354 components cover 12.36 million variants and the largest component is 0.282% of rows.
+- [x] Select `rho_CV=0.01` and replace distance-binned, per-gene CRE folds with ten global LD-component folds. The full-cache setup smoke test produced 3,354 components and fold sizes balanced to within one variant.

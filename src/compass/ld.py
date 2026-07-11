@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+from numba import njit
 
 
 REGION_LENGTH = 3_000_000
@@ -34,6 +35,151 @@ GRCH37_AUTOSOME_LENGTHS = {
     21: 48_129_895,
     22: 51_304_566,
 }
+
+
+@njit(cache=True)
+def _component_find(parent: np.ndarray, index: int) -> int:
+    root = index
+    while parent[root] != root:
+        root = parent[root]
+    while parent[index] != index:
+        next_index = parent[index]
+        parent[index] = root
+        index = next_index
+    return root
+
+
+@njit(cache=True)
+def _component_union(parent: np.ndarray, size: np.ndarray, left: int, right: int) -> None:
+    left_root = _component_find(parent, left)
+    right_root = _component_find(parent, right)
+    if left_root == right_root:
+        return
+    if size[left_root] < size[right_root]:
+        left_root, right_root = right_root, left_root
+    parent[right_root] = left_root
+    size[left_root] += size[right_root]
+
+
+@njit(cache=True)
+def _ld_component_parents(
+    indptr: np.ndarray,
+    indices: np.ndarray,
+    values: np.ndarray,
+    threshold: float,
+) -> np.ndarray:
+    """Find components without materializing a thresholded sparse copy."""
+
+    n_rows = indptr.size - 1
+    parent = np.arange(n_rows, dtype=np.int32)
+    size = np.ones(n_rows, dtype=np.int32)
+    for row in range(n_rows):
+        for offset in range(indptr[row], indptr[row + 1]):
+            column = indices[offset]
+            if column > row and values[offset] >= threshold:
+                _component_union(parent, size, row, column)
+    for row in range(n_rows):
+        parent[row] = _component_find(parent, row)
+    return parent
+
+
+def make_ld_component_cv_groups(
+    ld_blocks,
+    annotation: sp.csr_matrix,
+    n_mechanisms: int,
+    n_folds: int = 10,
+    r2_threshold: float = 0.01,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Build global LD-component folds and the valid held-out score rows.
+
+    Every variant belongs to one global (chromosome-local) LD component. Components
+    are assigned to folds while favoring distinct folds for components linked to
+    the same gene. A held-out CRE row is scored only when at least one of its
+    linked genes has annotations in a component assigned to another fold.
+    """
+
+    if n_folds < 2:
+        raise ValueError("n_folds must be at least two")
+    if not 0 < r2_threshold <= 1:
+        raise ValueError("r2_threshold must be in (0, 1]")
+    if n_mechanisms < 1:
+        raise ValueError("n_mechanisms must be positive")
+
+    annotation = annotation.tocsr()
+    n_variants, n_params = annotation.shape
+    if n_params % n_mechanisms:
+        raise ValueError("annotation columns must be divisible by n_mechanisms")
+    n_genes = n_params // n_mechanisms
+    component_by_variant = np.full(n_variants, -1, dtype=np.int32)
+    component_offset = 0
+    for block in ld_blocks:
+        rows = np.asarray(block.rows, dtype=np.int64)
+        matrix = block.R2.tocsr()
+        if matrix.shape != (rows.size, rows.size):
+            raise ValueError(f"LD block chromosome {block.chrom} does not match its row index")
+        parent = _ld_component_parents(
+            matrix.indptr.astype(np.int64, copy=False),
+            matrix.indices.astype(np.int64, copy=False),
+            matrix.data.astype(np.float32, copy=False),
+            float(r2_threshold),
+        )
+        _, local_components = np.unique(parent, return_inverse=True)
+        component_by_variant[rows] = local_components.astype(np.int32) + component_offset
+        component_offset += int(local_components.max(initial=-1)) + 1
+
+    if np.any(component_by_variant < 0):
+        raise ValueError("LD blocks did not cover every annotation row")
+    n_components = component_offset
+    component_sizes = np.bincount(component_by_variant, minlength=n_components).astype(np.int64)
+
+    annotation_rows = np.repeat(np.arange(n_variants, dtype=np.int64), np.diff(annotation.indptr))
+    annotation_genes = (annotation.indices // n_mechanisms).astype(np.int64, copy=False)
+    component_gene_codes = component_by_variant[annotation_rows].astype(np.int64) * n_genes + annotation_genes
+    component_gene_codes = np.unique(component_gene_codes)
+    component_gene = component_gene_codes // n_genes
+    gene_for_component = (component_gene_codes % n_genes).astype(np.int64, copy=False)
+    starts = np.searchsorted(component_gene, np.arange(n_components), side="left")
+    ends = np.searchsorted(component_gene, np.arange(n_components), side="right")
+    gene_counts = ends - starts
+
+    component_fold = np.full(n_components, -1, dtype=np.int16)
+    fold_rows = np.zeros(n_folds, dtype=np.int64)
+    gene_fold_seen = np.zeros((n_genes, n_folds), dtype=bool)
+    # Larger and more gene-connected components are allocated first. Among folds
+    # with equal gene overlap, choose the smallest current regression-row total.
+    order = np.lexsort((-gene_counts, -component_sizes))
+    for component in order:
+        genes = gene_for_component[starts[component] : ends[component]]
+        if genes.size:
+            overlap = gene_fold_seen[genes].sum(axis=0)
+            candidates = np.flatnonzero(overlap == overlap.min())
+        else:
+            candidates = np.arange(n_folds)
+        fold = int(candidates[np.argmin(fold_rows[candidates])])
+        component_fold[component] = fold
+        fold_rows[fold] += component_sizes[component]
+        if genes.size:
+            gene_fold_seen[genes, fold] = True
+
+    cv_groups = component_fold[component_by_variant].astype(np.int16, copy=False)
+    gene_fold_present = np.zeros((n_genes, n_folds), dtype=bool)
+    np.logical_or.at(gene_fold_present, (gene_for_component, component_fold[component_gene]), True)
+    gene_supported = gene_fold_present.sum(axis=1, keepdims=True) > gene_fold_present
+    score_groups = np.full(n_variants, -1, dtype=np.int16)
+    eligible = gene_supported[annotation_genes, cv_groups[annotation_rows]]
+    eligible_rows = np.unique(annotation_rows[eligible])
+    score_groups[eligible_rows] = cv_groups[eligible_rows]
+
+    return cv_groups, score_groups, {
+        "cv_method": "ld_component",
+        "cv_r2_threshold": float(r2_threshold),
+        "cv_folds": int(n_folds),
+        "cv_components": int(n_components),
+        "cv_largest_component": int(component_sizes.max(initial=0)),
+        "cv_fold_rows": fold_rows.tolist(),
+        "cv_score_rows": int(eligible_rows.size),
+        "cv_score_rows_by_fold": np.bincount(score_groups[score_groups >= 0], minlength=n_folds).tolist(),
+    }
 
 
 def ukbb_ld_block_stems(chromosomes: list[int] | None = None) -> list[tuple[int, int, int, str]]:

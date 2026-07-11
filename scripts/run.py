@@ -14,7 +14,12 @@ import pandas as pd
 import scipy.sparse as sp
 
 from compass.data import load_abc_annotations, load_gwas_sumstats, load_top_assoc_annotations, make_training_table
-from compass.ld import annotation_triples_to_csr, build_ukbb_ld_r2_by_chromosome, filter_variants_to_ukbb_ld
+from compass.ld import (
+    annotation_triples_to_csr,
+    build_ukbb_ld_r2_by_chromosome,
+    filter_variants_to_ukbb_ld,
+    make_ld_component_cv_groups,
+)
 from compass.model import CompassDataset, LdChromosomeBlock, fit_nuclear_norm_path
 
 
@@ -67,7 +72,7 @@ def _cache_key(args, gwas_path: Path) -> str:
             cell_types = hashlib.sha1(args.abc_cell_types.encode("utf-8")).hexdigest()[:12]
         source = (
             f"abc.allrows.{args.abc_score_column}.min{args.abc_min_score:g}."
-            f"folds{args.cre_folds}.gap{args.cre_ld_gap}.r2ge{args.ld_r2_cutoff:g}.chromfp16.{cell_types}"
+            f"r2ge{args.ld_r2_cutoff:g}.chromfp16.{cell_types}"
         )
     else:
         source = f"topassoc.{args.annotation_value}"
@@ -130,6 +135,37 @@ def _cache_paths(cache_dir: Path, key: str) -> dict[str, Path]:
     }
 
 
+def _legacy_abc_cache_paths(cache_dir: Path, args, gwas_path: Path) -> dict[str, Path] | None:
+    """Reuse pre-component-CV caches without copying their large LD archives."""
+
+    if args.annotation_source != "abc":
+        return None
+    intercept = "intercept" if not args.no_intercept else "nointercept"
+    if args.abc_cell_types.lower() == "all":
+        cell_types = "all"
+    else:
+        cell_types = hashlib.sha1(args.abc_cell_types.encode("utf-8")).hexdigest()[:12]
+    pattern = (
+        f"abc.allrows.{args.abc_score_column}.min{args.abc_min_score:g}.folds*.gap*."
+        f"r2ge{args.ld_r2_cutoff:g}.chromfp16.{cell_types}.{intercept}.{gwas_path.name}*.A.npz"
+    )
+    matches = sorted(cache_dir.glob(pattern), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not matches:
+        return None
+    prefix = matches[0].name.removesuffix(".A.npz")
+    legacy_prefix = cache_dir / prefix
+    return {
+        "A": Path(f"{legacy_prefix}.A.npz"),
+        "R2": Path(f"{legacy_prefix}.R2.npz"),
+        "R2_dir": Path(f"{legacy_prefix}.gwas.R2.chroms"),
+        "arrays": Path(f"{legacy_prefix}.arrays.npz"),
+        "genes": Path(f"{legacy_prefix}.genes"),
+        "mechanisms": Path(f"{legacy_prefix}.mechanisms.json"),
+        "ld_diagnostics": Path(f"{legacy_prefix}.ld_diagnostics"),
+        "metadata": Path(f"{legacy_prefix}.metadata.json"),
+    }
+
+
 def _dataset_cache_exists(paths: dict[str, Path]) -> bool:
     genes_exists = _frame_path(paths["genes"], ".parquet").exists() or _frame_path(paths["genes"], ".pkl").exists()
     diagnostics_exists = _frame_path(paths["ld_diagnostics"], ".parquet").exists() or _frame_path(
@@ -186,6 +222,11 @@ def _load_dataset_cache(paths: dict[str, Path]):
         R2=R2,
         ld_blocks=ld_blocks,
         cv_groups=arrays["cv_groups"] if "cv_groups" in arrays and np.any(arrays["cv_groups"] >= 0) else None,
+        cv_score_groups=(
+            arrays["cv_score_groups"]
+            if "cv_score_groups" in arrays and np.any(arrays["cv_score_groups"] >= 0)
+            else None
+        ),
     )
     return dataset, genes, mechanisms, ld_diagnostics, str(arrays["n_samples_source"])
 
@@ -247,6 +288,11 @@ def _write_dataset_cache(
                 if dataset.cv_groups is not None
                 else np.full(dataset.n_variants, -1, dtype=np.int64)
             ),
+            cv_score_groups=(
+                np.asarray(dataset.cv_score_groups, dtype=np.int64)
+                if dataset.cv_score_groups is not None
+                else np.full(dataset.n_variants, -1, dtype=np.int64)
+            ),
             n_samples=np.asarray(dataset.n_samples, dtype=np.float32),
             n_samples_source=np.asarray(n_samples_source),
         )
@@ -265,8 +311,8 @@ def main() -> None:
     parser.add_argument("--abc-cell-types", default=DEFAULT_ABC_CELL_TYPES)
     parser.add_argument("--abc-score-column", default="ABC.Score")
     parser.add_argument("--abc-min-score", type=float, default=0.015)
-    parser.add_argument("--cre-folds", type=int, default=5)
-    parser.add_argument("--cre-ld-gap", type=int, default=1_000_000)
+    parser.add_argument("--cv-folds", type=int, default=10)
+    parser.add_argument("--cv-r2-threshold", type=float, default=0.01)
     parser.add_argument("--gwas", default=None)
     parser.add_argument("--ld-dir", default=None)
     parser.add_argument("--out-dir", default=None)
@@ -300,6 +346,13 @@ def main() -> None:
     parser.add_argument("--run-name", default=None)
     args = parser.parse_args()
 
+    if args.cv_folds < 2:
+        parser.error("--cv-folds must be at least 2")
+    if not 0 < args.cv_r2_threshold <= 1:
+        parser.error("--cv-r2-threshold must be in (0, 1]")
+    if args.cv_r2_threshold < args.ld_r2_cutoff:
+        parser.error("--cv-r2-threshold cannot be below --ld-r2-cutoff")
+
     data_root = Path(args.data_root).expanduser()
     top_assoc_dir = Path(args.top_assoc_dir).expanduser() if args.top_assoc_dir else data_root / "raw" / "zenodo_top_assoc"
     abc_path = Path(args.abc_path).expanduser() if args.abc_path else data_root / "raw" / "abc" / DEFAULT_ABC_NAME
@@ -319,6 +372,11 @@ def main() -> None:
 
     key = _cache_key(args, gwas_path)
     paths = _cache_paths(cache_dir, key)
+    if not args.rebuild_cache and not _dataset_cache_exists(paths):
+        legacy_paths = _legacy_abc_cache_paths(cache_dir, args, gwas_path)
+        if legacy_paths is not None and _dataset_cache_exists(legacy_paths):
+            print(f"[setup] reuse compatible pre-component-CV cache {legacy_paths['A'].stem}", flush=True)
+            paths = legacy_paths
     if not args.rebuild_cache and _dataset_cache_exists(paths):
         dataset, genes, mechanisms, ld_diagnostics, n_samples_source = _load_dataset_cache(paths)
     else:
@@ -332,8 +390,6 @@ def main() -> None:
                     min_score=args.abc_min_score,
                     cell_types=args.abc_cell_types,
                     add_intercept=not args.no_intercept,
-                    n_folds=args.cre_folds,
-                    ld_gap=args.cre_ld_gap,
                 )
             else:
                 ann = load_top_assoc_annotations(
@@ -407,14 +463,26 @@ def main() -> None:
             chrom=variants["chrom"].to_numpy(np.int64),
             n_samples=n_samples,
             ld_blocks=ld_blocks,
-            cv_groups=(
-                variants["cv_group"].to_numpy(np.int64)
-                if "cv_group" in variants.columns and (variants["cv_group"] >= 0).any()
-                else None
-            ),
         )
         genes = ann.genes
         mechanisms = ann.mechanisms
+
+    cv_metadata = None
+    if not args.no_cv:
+        if dataset.ld_blocks is None:
+            raise ValueError("LD-component CV requires chromosome-level LD blocks")
+        with _timed("build global LD-component CV folds"):
+            cv_groups, cv_score_groups, cv_metadata = make_ld_component_cv_groups(
+                dataset.ld_blocks,
+                dataset.A,
+                len(mechanisms),
+                n_folds=args.cv_folds,
+                r2_threshold=args.cv_r2_threshold,
+            )
+        dataset.cv_groups = cv_groups
+        dataset.cv_score_groups = cv_score_groups
+
+    if not _dataset_cache_exists(paths):
         _write_dataset_cache(paths, dataset, genes, mechanisms, ld_diagnostics, n_samples_source)
 
     print(
@@ -423,6 +491,15 @@ def main() -> None:
         f"{dataset.R2.nnz if dataset.R2 is not None else sum(block.R2.nnz for block in dataset.ld_blocks)}",
         flush=True,
     )
+    if cv_metadata is not None:
+        print(
+            f"[setup] LD-component CV components={cv_metadata['cv_components']} "
+            f"largest_component={cv_metadata['cv_largest_component']} "
+            f"fold_rows={cv_metadata['cv_fold_rows']} "
+            f"score_rows={cv_metadata['cv_score_rows']} "
+            f"score_rows_by_fold={cv_metadata['cv_score_rows_by_fold']}",
+            flush=True,
+        )
     if args.setup_only:
         print("[setup] setup-only complete", flush=True)
         return
@@ -483,6 +560,7 @@ def main() -> None:
         "ld_jobs": args.ld_jobs,
         "ld_r2_cutoff": args.ld_r2_cutoff,
         "ld_representation": "chromosome_fp16",
+        "cv_component_metadata": cv_metadata,
         "cache_key": key,
         "cv": not args.no_cv,
         "annotation_source": args.annotation_source,
@@ -490,8 +568,8 @@ def main() -> None:
         "abc_cell_types": args.abc_cell_types if args.annotation_source == "abc" else None,
         "abc_score_column": args.abc_score_column if args.annotation_source == "abc" else None,
         "abc_min_score": args.abc_min_score if args.annotation_source == "abc" else None,
-        "cre_folds": args.cre_folds if args.annotation_source == "abc" else None,
-        "cre_ld_gap": args.cre_ld_gap if args.annotation_source == "abc" else None,
+        "cv_folds": args.cv_folds if not args.no_cv else None,
+        "cv_r2_threshold": args.cv_r2_threshold if not args.no_cv else None,
     }
     with open(f"{prefix}.metadata.json", "w", encoding="utf-8") as handle:
         json.dump(_json_safe(metadata), handle, indent=2, sort_keys=True)
