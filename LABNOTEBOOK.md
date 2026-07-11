@@ -166,3 +166,4 @@
 - Added `bfloat16` as a model-parameter option. BF16 outputs are converted to fp32 only at the NumPy result boundary.
 - Convergence norms are now evaluated in fp32 so a zero fp16 coefficient matrix does not produce `0/0` from an underflowed epsilon.
 - Fit selection and plateau stopping now use the full penalized objective (weighted data loss plus nuclear-norm penalty), not data loss alone. A BF16 `lambda=100` trace reached the plateau stop at iteration 40 rather than the previous 500-step cap.
+- The completed FP32 and BF16 fits both selected the lower lambda boundary (`1e-4`), so that grid does not identify an interior CV optimum. Nuclear-path CV now automatically continues from each fold's warm start at up to four successively smaller lambdas (factor 3 by default) whenever the lower boundary wins.

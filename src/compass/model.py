@@ -642,6 +642,8 @@ def grouped_variant_cv(
     device: str = "cpu",
     folds: list[int] | None = None,
     prepared_blocks: list[dict] | None = None,
+    max_lambda_extensions: int = 4,
+    lambda_extension_factor: float = 3.0,
     **kwargs,
 ) -> dict[float, float]:
     if dataset.cv_groups is None:
@@ -650,9 +652,15 @@ def grouped_variant_cv(
     available = sorted(int(x) for x in np.unique(groups) if int(x) >= 0)
     if not available:
         raise ValueError("CRE-structured CV requires at least one non-negative CV group")
-    scores: dict[float, list[float]] = {float(lam): [] for lam in lambdas}
+    if max_lambda_extensions < 0:
+        raise ValueError("max_lambda_extensions must be non-negative")
+    if lambda_extension_factor <= 1.0:
+        raise ValueError("lambda_extension_factor must be greater than one")
+    ordered = sorted({float(lam) for lam in lambdas}, reverse=True)
+    scores: dict[float, list[float]] = {lam: [] for lam in ordered}
     selected_folds = available if folds is None else [int(fold) for fold in folds]
     block_specs = _prepare_fit_blocks(dataset, device) if prepared_blocks is None else prepared_blocks
+    fold_states: dict[int, tuple[np.ndarray, float]] = {}
     for fold in selected_folds:
         if not np.any(groups != fold) or not np.any(groups == fold):
             continue
@@ -682,7 +690,7 @@ def grouped_variant_cv(
         init_tau = 1e-8
         init_s = None
         init_w = None
-        for lam in sorted([float(x) for x in lambdas], reverse=True):
+        for lam in ordered:
             if method == "nuclear":
                 B, tau, _, _ = fit_nuclear_norm(
                     dataset,
@@ -723,7 +731,55 @@ def grouped_variant_cv(
             init_tau = tau
             score = _evaluate_fit_mse(block_specs, B, tau, device, kwargs.get("ld_chunk_nnz"), fold=fold)
             scores[lam].append(score)
+        if method == "nuclear":
+            assert init_B is not None
+            fold_states[fold] = (init_B, init_tau)
         del train_blocks
+
+    # A lower-bound CV selection leaves the regularization optimum unidentified.
+    # Continue each fold from its endpoint rather than refitting the existing path.
+    extensions = 0
+    while method == "nuclear" and extensions < max_lambda_extensions:
+        mean_scores = {lam: float(np.mean(values)) for lam, values in scores.items() if values}
+        if not mean_scores:
+            break
+        smallest = min(mean_scores)
+        if min(mean_scores, key=mean_scores.get) != smallest:
+            break
+        next_lambda = smallest / lambda_extension_factor
+        if next_lambda in scores:
+            break
+        scores[next_lambda] = []
+        for fold in selected_folds:
+            if fold not in fold_states:
+                continue
+            train_blocks = []
+            for block in block_specs:
+                block_groups = block["cv_groups"]
+                if block_groups is None:
+                    raise ValueError("CRE-structured CV requires cv_groups in prepared blocks")
+                train_weight = block["weight"] * block_groups.ne(fold).to(block["weight"].dtype)
+                train_blocks.append({**block, "weight": train_weight})
+            init_B, init_tau = fold_states[fold]
+            B, tau, _, _ = fit_nuclear_norm(
+                dataset,
+                n_genes,
+                n_mechanisms,
+                next_lambda,
+                init_B=init_B,
+                init_tau=init_tau,
+                lr=lr,
+                max_iter=max_iter,
+                device=device,
+                progress_label=f"cv-fold={fold}",
+                prepared_blocks=train_blocks,
+                **kwargs,
+            )
+            score = _evaluate_fit_mse(block_specs, B, tau, device, kwargs.get("ld_chunk_nnz"), fold=fold)
+            scores[next_lambda].append(score)
+            fold_states[fold] = (B, tau)
+            del train_blocks
+        extensions += 1
     return {lam: float(np.mean(vals)) for lam, vals in scores.items() if vals}
 
 
@@ -733,6 +789,8 @@ def fit_nuclear_norm_path(
     n_mechanisms: int,
     lambdas: list[float],
     cv: bool = True,
+    max_lambda_extensions: int = 4,
+    lambda_extension_factor: float = 3.0,
     **kwargs,
 ) -> FitResult:
     ordered = sorted([float(l) for l in lambdas], reverse=True)
@@ -745,11 +803,15 @@ def fit_nuclear_norm_path(
             ordered,
             method="nuclear",
             prepared_blocks=prepared_blocks,
+            max_lambda_extensions=max_lambda_extensions,
+            lambda_extension_factor=lambda_extension_factor,
             **kwargs,
         )
         if cv
         else None
     )
+    if cv_scores:
+        ordered = sorted(cv_scores, reverse=True)
     best = min(cv_scores, key=cv_scores.get) if cv_scores else ordered[-1]
     init_B = None
     init_tau = 1e-8
@@ -761,6 +823,8 @@ def fit_nuclear_norm_path(
         "cv_method": "cre_ld_group" if cv else None,
         "cv_folds": cv_folds,
         "tau_update": "exact_weighted_least_squares",
+        "lambda_extensions": max(0, len(ordered) - len({float(lam) for lam in lambdas})),
+        "lambda_extension_factor": lambda_extension_factor,
     }
     B = None
     tau = init_tau

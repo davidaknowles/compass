@@ -278,6 +278,8 @@ def main() -> None:
         type=_parse_lambdas,
         default=_parse_lambdas("1e3,3e2,1e2,3e1,1e1,3,1,3e-1,1e-1,3e-2,1e-2,3e-3,1e-3,3e-4,1e-4"),
     )
+    parser.add_argument("--max-lambda-extensions", type=int, default=4)
+    parser.add_argument("--lambda-extension-factor", type=float, default=3.0)
     parser.add_argument("--max-iter", type=int, default=500)
     parser.add_argument("--progress-every", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-8)
@@ -431,6 +433,8 @@ def main() -> None:
             n_genes=genes.shape[0],
             n_mechanisms=len(mechanisms),
             lambdas=args.lambdas,
+            max_lambda_extensions=args.max_lambda_extensions,
+            lambda_extension_factor=args.lambda_extension_factor,
             cv=not args.no_cv,
             lr=args.lr,
             max_iter=args.max_iter,
@@ -472,6 +476,8 @@ def main() -> None:
         "model_dtype": args.model_dtype,
         "ld_dtype": "float16",
         "ld_chunk_nnz": args.ld_chunk_nnz,
+        "max_lambda_extensions": args.max_lambda_extensions,
+        "lambda_extension_factor": args.lambda_extension_factor,
         "svd_method": args.svd_method,
         "svd_rank": args.svd_rank,
         "ld_jobs": args.ld_jobs,

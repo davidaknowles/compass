@@ -7,6 +7,7 @@
 - [x] Cancel fp16 job `18757013`: fp16 model-state underflow caused a non-finite convergence metric at high lambda.
 - [x] Submit validated BF16 masked-row CRE-CV fit `18760205` with penalized-objective plateau stopping; it entered fold 0 cleanly.
 - [x] Submit corrected fp32 comparison fit `18769161` after a local full-genome high-lambda test stopped at iteration 40.
+- [ ] Submit extended-grid FP32 fit after adding automatic lower-bound lambda extension.
 
 ## Near-term engineering
 
