@@ -24,3 +24,8 @@
 - [x] Migrate the current chromosome LD cache to non-destructive uncompressed archives and prefer them through `manifest.uncompressed.json`.
 - [x] Replace copied train/test LD fold subsets with masked-row CRE CV over the full LD operator; the five-fold all-variant smoke test completed without OOM.
 - [x] Keep torch CSR rather than a custom CUDA kernel or fp8: after the zero-copy change, sparse backward is the largest recurring cost and transfer is second; neither justifies the added implementation risk yet.
+
+## LD-Component Cross-Validation
+
+- [x] Measure connected components across `r2` thresholds `0.01, 0.015, 0.02, 0.03, 0.05, 0.075, 0.10` from the cached all-variant LD graph. The full sweep completed in 368 seconds with 19.5 GB peak RSS.
+- [ ] Select `rho_CV` and replace distance-binned, per-gene CRE folds with global LD-component fold labels. At `r2 >= 0.01`, 3,354 components cover 12.36 million variants and the largest component is 0.282% of rows.

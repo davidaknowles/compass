@@ -167,3 +167,23 @@
 - Convergence norms are now evaluated in fp32 so a zero fp16 coefficient matrix does not produce `0/0` from an underflowed epsilon.
 - Fit selection and plateau stopping now use the full penalized objective (weighted data loss plus nuclear-norm penalty), not data loss alone. A BF16 `lambda=100` trace reached the plateau stop at iteration 40 rather than the previous 500-step cap.
 - The completed FP32 and BF16 fits both selected the lower lambda boundary (`1e-4`), so that grid does not identify an interior CV optimum. Nuclear-path CV now automatically continues from each fold's warm start at up to four successively smaller lambdas (factor 3 by default) whenever the lower boundary wins.
+
+## 2026-07-11 LD-component CV diagnostic
+
+### Implementation
+
+- Added `scripts/diagnose_ld_components.py`, which computes exact connected components independently by chromosome from the cached UK Biobank LD graph.
+- The diagnostic uses a Numba disjoint-set union implementation and evaluates every requested threshold in a single scan of each chromosome's sparse CSR matrix.
+- It writes genome-wide and per-chromosome summaries, component-size histograms, and plotnine threshold plots. `scripts/slurm/diagnose_ld_components.sbatch` runs the complete diagnostic.
+
+### Genome-wide results
+
+- The all-autosome sweep completed in 368 seconds of analysis time, with 19.5 GB peak resident memory.
+- At `r2 >= 0.01`, the graph has 3,354 components across 12,362,312 variants. The largest component contains 34,901 variants (0.282% of rows), and 5.427 billion undirected edges are retained.
+- Increasing the threshold to `0.015`, `0.02`, `0.03`, `0.05`, `0.075`, and `0.10` yields 5,841, 9,001, 17,719, 43,661, 87,808, and 140,412 components, respectively.
+- The largest component remains small across this range (34,343--34,901 variants). At `r2 >= 0.01`, the 99th percentile component size is 18,248 variants; at `r2 >= 0.10`, it is 45 variants, with a small number of much larger components remaining.
+
+### Consequence for CV
+
+- `r2 >= 0.01` is a viable candidate for global LD-component CV: it preserves separation for every cached LD edge while leaving thousands of indivisible units for five-fold balancing.
+- The current per-gene, distance-binned CRE folds remain in code only until the selected `rho_CV` is wired into the global component fold builder.
