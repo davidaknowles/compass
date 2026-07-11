@@ -6,7 +6,7 @@
 - [x] Cancel pre-objective-stop fp32 job `18756779`: it was spending 500 iterations on high-lambda plateaus.
 - [x] Cancel fp16 job `18757013`: fp16 model-state underflow caused a non-finite convergence metric at high lambda.
 - [x] Submit validated BF16 masked-row CRE-CV fit `18760205` with penalized-objective plateau stopping; it entered fold 0 cleanly.
-- [ ] Compare the completed BF16 fit against a corrected fp32 rerun if model precision materially affects selected lambda or held-out loss.
+- [x] Submit corrected fp32 comparison fit `18769161` after a local full-genome high-lambda test stopped at iteration 40.
 
 ## Near-term engineering
 
