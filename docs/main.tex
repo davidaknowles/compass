@@ -15,7 +15,7 @@ We present a unified methodological framework for estimating gene-specific media
 \end{abstract}
 
 \section{Model}
-Let $\omega_j$ denote the marginal effect of single nucleotide polymorphism (SNP) $j \in \{1, \dots, J\}$ on a complex trait. We model $\omega_j$ as a causal cascade mediated through genes $k \in \{1, \dots, K\}$:
+We start with the same setup as MESC. Let $\omega_j$ denote the marginal effect of single nucleotide polymorphism (SNP) $j \in \{1, \dots, J\}$ on a complex trait. We model $\omega_j$ as a causal cascade mediated through genes $k \in \{1, \dots, K\}$:
 \begin{equation}
     \omega_j = \sum_{k=1}^K \beta_{jk} \alpha_k + \gamma_j
 \end{equation}
@@ -139,38 +139,88 @@ Let $f(B, \tau_\gamma)$ denote the WOLS loss function from Equation (7). The alg
 
 This algorithm converges to the global optimal modular architecture, avoiding non-convexity and LD collinearity artifacts.
 
+\subsection{Cross-validation strategy}
+
+Leaving out an entire chromosome is not a valid penalty-selection scheme for determining $\lambda$. For example, if chromosome 1 is held out, then genes on chromosome 1 have no training annotations. Prediction on the held-out chromosome therefore relies on gene effects that were not estimable in the training set.
+
+We therefore propose the global, LD-aware procedure in Algorithm~\ref{alg:cre-cv}. The essential change is to define folds for genomic regions before considering genes. We construct a graph on variants, joining variants whose reference-panel LD exceeds a threshold $r_{jm}^2\ge\rho_{\mathrm{CV}}$, and use its connected components as indivisible holdout units. Each component receives one genome-wide fold label, so the same fold has the same meaning for every gene and a variant linked to multiple genes cannot receive conflicting labels. Components are distributed across folds to balance the number of regression rows and, where possible, to place different components linked to the same gene in different folds.
+
+Let $\mathcal{C}$ denote the set of CRE--gene links, and write $j\in c$ when variant $j$ lies in CRE $c$. After the LD components have been assigned labels $z_q$, define
+\begin{equation}
+\begin{aligned}
+\mathcal{K}(j)
+    &= \{k:\exists\,(c,k)\in\mathcal{C}\text{ with }j\in c\}, \\
+\mathcal{K}_{-p}
+    &= \{k:\exists\,(c,k)\in\mathcal{C},\ \exists\,q\text{ with }c\cap D_q\ne\varnothing\text{ and }z_q\ne p\}, \\
+\mathcal{S}_p
+    &= \{j\in V_p:\mathcal{K}(j)\cap\mathcal{K}_{-p}\ne\varnothing\}.
+\end{aligned}
+\label{eq:cv-sets}
+\end{equation}
+Here, $\mathcal{K}(j)$ is the set of genes linked to variant $j$; $\mathcal{K}_{-p}$ is the set of ``training'' genes for fold $p$, i.e. that have at least one CRE overlapping a training LD component; and $\mathcal{S}_p$ is the set of held-out variants linked to at least one training gene. The intersection criterion allows a scored variant to have additional linked genes without training support. Those genes do not disqualify the variant: their effects remain unmodeled validation signal, making the score conservative rather than removing an otherwise informative row.
+
+For fold $p$, all regression rows in $V_p$ are removed from the fitting loss. When scoring $j\in\mathcal{S}_p$, prediction is restricted to the supported genes,
+\begin{equation}
+\widehat{\chi}_{j,p\lambda}^{2,(-p)}
+=1+N\sum_{k\in\mathcal{K}_{-p}}\sum_{l=1}^L\widehat{B}_{kl}^{(p,\lambda)}\mathcal{T}_{jkl}
++N\widehat{\tau}_{\gamma}^{(p,\lambda)}l_j.
+\end{equation}
+Variants outside CREs also inherit their component's fold and are held out of the training loss, preventing them from carrying correlated GWAS signal across the fold boundary, but they do not themselves contribute to the validation score used to choose $\lambda$.
+
+\begin{algorithm}[H]
+\caption{Global LD-component cross-validation for selecting $\lambda$}
+\label{alg:cre-cv}
+\begin{algorithmic}[1]
+\State \textbf{Input:} CRE--gene links; GWAS variants; $A$ and $R^2$; descending penalty grid $\Lambda$; $F$ folds; LD threshold $\rho_{\mathrm{CV}}$
+\State Construct $G=(V,E)$ with $V=\{1,\ldots,J\}$ and $E=\{(j,m):r_{jm}^2\ge\rho_{\mathrm{CV}}\}$
+\State Let $D_1,\ldots,D_Q$ be the connected components of $G$
+\State Assign each $D_q$ one global label $z_q\in\{1,\ldots,F\}$, balancing rows and spreading components linked to the same gene across folds
+\State $\mathcal{P}\gets\varnothing$
+\For{$p=1,\ldots,F$}
+    \State $V_p\gets\bigcup_{q:z_q=p}D_q$ \Comment{All rows in held-out LD components}
+    \State Compute $\mathcal{K}_{-p}$ and $\mathcal{S}_p$ from Equation~\ref{eq:cv-sets}
+    \If{$\mathcal{S}_p=\varnothing$} \State \textbf{continue} \EndIf
+    \State $\mathcal{P}\gets\mathcal{P}\cup\{p\}$
+    \State Set regression weight $\eta_j^{(p)}\gets\eta_j\,\mathbf{1}[j\notin V_p]$
+    \State Initialize $B\gets 0$ and $\tau_\gamma\gets 10^{-8}$
+    \For{$\lambda\in\Lambda$ from largest to smallest}
+        \State Fit $(B,\tau_\gamma)$ using weights $\eta^{(p)}$, warm-starting from the preceding $\lambda$
+        \State Predict $\widehat{\chi}_{j,p\lambda}^{2,(-p)}$ using only genes in $\mathcal{K}_{-p}$
+        \State $E_{p\lambda}\gets |\mathcal{S}_p|^{-1}\sum_{j\in\mathcal{S}_p}(\chi_j^2-\widehat{\chi}_{j,p\lambda}^{2,(-p)})^2$
+    \EndFor
+\EndFor
+\State $\lambda^*\gets\arg\min_{\lambda\in\Lambda}|\mathcal{P}|^{-1}\sum_{p\in\mathcal{P}} E_{p\lambda}$
+\State Refit on all regression rows, again warm-starting from larger penalties down to $\lambda^*$
+\State \textbf{Output:} $\lambda^*$ and the full-data estimates $(\widehat B,\widehat\tau_\gamma)$
+\end{algorithmic}
+\end{algorithm}
+
+This design directly targets the desired generalization: the model learns $B_{kl}$ from some regulatory regions for gene $k$ and tests whether those estimates predict summary statistics in other regions for that gene, while preventing pairs with $r_{jm}^2\ge\rho_{\mathrm{CV}}$ from being split across training and validation. Unlike chromosome holdout, the size of each holdout unit is determined by the observed LD graph rather than chromosome boundaries; unlike per-gene fold labeling, its label is globally defined.
+
 \section{Application to Alzheimer Disease (AD) GWAS}
 
 Our default annotation source is the public Nasser et al. ABC prediction table: all element-gene connections with ABC score at least 0.015 across 131 biosamples.
 The ABC model predicts enhancer-gene regulation from enhancer activity and enhancer-promoter contact; the public table is distributed by the Engreitz Lab and is linked from their resource page. The ABC documentation defines the score
 as activity times contact, normalized over candidate elements within 5 Mb of the gene promoter, and notes that predictions are same-chromosome CRE-gene links.
 
-For Alzheimer disease (AD), the default run uses the brain-labelled biosamples available in this table: \texttt{astrocyte-ENCODE},
-\texttt{bipolar\_neuron\_from\_iPSC-ENCODE}, and
-\texttt{H1\_Derived\_Neuronal\_Progenitor\_Cultured\_Cells-Roadmap}. Because the public table does not contain a microglia biosample, the default also includes myeloid proxy contexts: \texttt{CD14-positive\_monocyte-ENCODE},
-\texttt{CD14-positive\_monocytes-Roadmap}, and
-\texttt{THP-1\_macrophage-VanBortle2017}. The full 131-biosample table is downloaded and can be selected by passing \texttt{--abc-cell-types all}.
+\begin{sloppypar}
+For Alzheimer disease (AD), the default run uses the brain-labelled biosamples available in this table: \path{astrocyte-ENCODE},
+\path{bipolar_neuron_from_iPSC-ENCODE}, and
+\path{H1_Derived_Neuronal_Progenitor_Cultured_Cells-Roadmap}. Because the public table does not contain a microglia biosample, the default also includes myeloid proxy contexts: \path{CD14-positive_monocyte-ENCODE},
+\path{CD14-positive_monocytes-Roadmap}, and
+\path{THP-1_macrophage-VanBortle2017}. The full 131-biosample table is downloaded and can be selected by passing \texttt{--abc-cell-types all}.
+\end{sloppypar}
 
 The implementation reads the ABC table in chunks, intersects each CRE interval with GWAS variants, and emits sparse variant-gene-context triples whose values are ABC scores. The regression row universe is not restricted to ABC-overlapping
-variants. Instead, COMPASS uses all GWAS variants represented in the UK Biobank LD reference panel. Variants outside ABC CREs have all-zero annotation rows but remain in the regression so they contribute to LD tagging and the residual non-ABC-mediated LD-score term. Nearby CREs for the same gene are collapsed into
-coarse LD-distance clusters before fold assignment.
+variants. Instead, COMPASS uses all GWAS variants represented in the UK Biobank LD reference panel. Variants outside ABC CREs have all-zero annotation rows but remain in the regression so they contribute to LD tagging and the residual non-ABC-mediated LD-score term. In the proposed cross-validation scheme, the same reference panel defines global LD components shared by all genes.
 
 LD is represented as chromosome-level sparse blocks rather than a single genome-wide matrix. Raw UK Biobank correlations are converted to $r^2$, entries with $r^2<0.01$ are discarded, and the retained LD values are stored and applied as half-precision sparse tensors during fitting. Other model tensors default to
 single precision, with a command-line option to compare half-precision model tensors against the default while keeping LD half precision in both runs.
 
-\subsection{Cross-validation strategy}
-
-Leaving out an entire chromosome is not a valid penalty-selection scheme for the gene-indexed COMPASS parameter $B$. If chromosome 1 is held out, then genes on chromosome 1 have no training annotations. Prediction on the held-out chromosome therefore relies on gene effects that were not estimable in the training set. 
-
-Our CV design therefore assigns fold labels to CRE groups rather than chromosomes. For each gene, CREs are sorted by genomic position after grouping nearby CREs into LD-distance clusters. Independent clusters for the same gene are assigned across folds. Variant-level fold labels are then inherited from the CRE groups they overlap; variants overlapping multiple conflicting folds are retained for training but are not used as validation rows. For a validation fold, the model is trained on all variants not assigned to that fold and evaluated on variants assigned to the held-out CRE fold.
-
-This design has the intended target: the model learns $B_{kl}$ from some CREs for a gene and tests whether those estimates predict summary statistics for variants in other, approximately LD-independent CREs for the same gene. It also preserves genome-wide LD modeling because the held-out units are local CRE
-clusters rather than whole chromosomes.
-
 \subsection{Implementation status}
 
 The repository now downloads the public ABC table into
-\texttt{raw/abc/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz} and uses ABC annotations by default in \texttt{scripts/run.py}. Dataset caches store CRE fold labels alongside GWAS statistics, chromosome labels, and sample
-sizes. The row set is filtered to variants present in the UK Biobank LD metadata, and non-CRE rows are retained with zero annotations. 
+\path{raw/abc/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz} and uses ABC annotations by default in \texttt{scripts/run.py}. Dataset caches store CRE fold labels alongside GWAS statistics, chromosome labels, and sample
+sizes. The row set is filtered to variants present in the UK Biobank LD metadata, and non-CRE rows are retained with zero annotations. The global LD-component construction in Algorithm~\ref{alg:cre-cv} is a proposed replacement for the current per-gene, distance-binned fold labels and is not yet implemented.
 
 \end{document}
