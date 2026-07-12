@@ -207,4 +207,11 @@
 
 - The rank-1 follow-up is initialized from the leading non-negative SVD factors of the selected nuclear-norm solution and uses the same selected penalty (`lambda=100`).
 - The rank-1 residual coefficient now uses the same exact non-negative weighted least-squares coordinate update as the nuclear fit.
-- Agora's public nominated-target export (`/api/v1/genes/nominated`) contains 967 targets in the current download. Post-fit analysis will test target overlap for global and context-specific rankings alongside ordered g:Profiler enrichment.
+- Agora's public nominated-target export (`/api/v1/genes/nominated`) contains 967 targets in the current download. Post-fit analysis reports target overlap for global and context-specific rankings alongside ordered g:Profiler enrichment.
+
+### Rank-one fit and post-fit analysis
+
+- The rank-one refit at `lambda=100`, initialized from the nuclear solution, completed in 164 seconds. Its final objective was `0.782008`, compared with the nuclear fit's `0.782004`.
+- Rank-one and nuclear coefficients have Pearson correlation `0.999984` and relative Frobenius difference `0.0139`; both are numerically rank one with `tau=0`.
+- For ordered g:Profiler, queries were limited to the top 100 positive ranked genes. The resulting terms are dominated by broad HPA tissue signatures, not AD- or brain-specific pathways; no mechanistic interpretation is supported.
+- Agora cross-reference uses HGNC-symbol matching when ABC target labels are symbols. Of 18,396 assayed genes, 865 overlap the 967 Agora nominated targets. At top 1,000 global genes, the nuclear fit has 68 targets (`p=0.00139`) and the rank-one fit has 69 (`p=0.000877`) versus about 47 expected. At top 100, both have 6 targets (`p=0.33`). These are unadjusted, exploratory overlaps.
