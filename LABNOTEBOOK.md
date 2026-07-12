@@ -194,3 +194,11 @@
 - The full-cache setup test completed successfully with 3,354 components, a largest component of 34,901 variants, and fold row totals of 1,236,231 or 1,236,232 each.
 - There are 104,411 held-out CRE scoring rows after requiring at least one linked gene to have an annotation in another fold. The ten fold-specific score counts range from 8,975 to 11,558.
 - Cache loading took 170 seconds and component/fold construction took 269 seconds on the validation CPU allocation, with approximately 75 GB peak resident memory.
+
+### Ten-fold AD fit
+
+- The FP32 ten-fold LD-component CV fit completed successfully after 10.6 hours, with 72.4 GB peak resident memory.
+- CV selected the interior penalty `lambda=100`: mean held-out MSE was `2.98058882`, compared with `2.98074335` at `lambda=300` and `1000`, and `2.98737117` at `lambda=30`.
+- The selected full-data fit has `tau=0`, 2,181 positive genes, and 15,267 positive gene-context entries. Its total coefficient sum is `8.58e-05`.
+- The coefficient matrix is numerically rank one: its leading singular value is `8.63e-07`, while the remaining singular values are approximately `1e-14`. All seven contexts are positive for the same 2,181 genes, with nearly identical cross-gene coefficient ratios.
+- This fit identifies a weak aggregate mediated component but does not provide stable gene- or cell-type-specific prioritization. GSEA on this rank-one, near-uniform solution would not be biologically interpretable.
