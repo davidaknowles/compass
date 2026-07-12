@@ -27,6 +27,12 @@ def _load_targets(path: Path) -> pd.DataFrame:
     return targets[["ensembl_gene_id", "hgnc_symbol", "total_nominations"]].drop_duplicates("ensembl_gene_id")
 
 
+def _target_lookup(targets: pd.DataFrame) -> pd.DataFrame:
+    by_ensembl = targets.assign(match_key=targets["ensembl_gene_id"].astype(str).str.upper())
+    by_symbol = targets.assign(match_key=targets["hgnc_symbol"].astype(str).str.upper())
+    return pd.concat([by_ensembl, by_symbol], ignore_index=True).drop_duplicates("match_key")
+
+
 def _rankings(B: pd.DataFrame) -> dict[str, pd.DataFrame]:
     rankings = {"global": B.sum(axis=1)}
     rankings.update({str(column): B[column] for column in B.columns if column != "intercept"})
@@ -54,17 +60,22 @@ def main() -> None:
 
     B = pd.read_csv(Path(args.b_tsv).expanduser(), sep="\t", index_col=0).apply(pd.to_numeric, errors="coerce").fillna(0.0)
     targets = _load_targets(Path(args.agora_json).expanduser())
-    target_ids = set(targets["ensembl_gene_id"].astype(str))
+    targets_by_key = _target_lookup(targets)
     targets.to_csv(out_dir / "agora_nominated_targets.tsv", sep="\t", index=False)
 
     summary_rows = []
     for analysis, ranking in _rankings(B).items():
-        ranking["agora_nominated"] = ranking["ensembl_gene_id"].isin(target_ids)
-        ranking = ranking.merge(targets, on="ensembl_gene_id", how="left")
+        ranking["match_key"] = np.where(
+            ranking["ensembl_gene_id"].str.upper().str.startswith("ENSG"),
+            ranking["ensembl_gene_id"].str.upper(),
+            ranking["gene_id"].str.upper(),
+        )
+        ranking = ranking.merge(targets_by_key, on="match_key", how="left", suffixes=("", "_agora"))
+        ranking["agora_nominated"] = ranking["ensembl_gene_id_agora"].notna()
         ranking.insert(0, "rank", np.arange(1, ranking.shape[0] + 1))
         ranking.to_csv(out_dir / f"{analysis}.agora_ranked_genes.tsv", sep="\t", index=False)
 
-        eligible = ranking["ensembl_gene_id"].isin(target_ids)
+        eligible = ranking["agora_nominated"]
         population = int(ranking.shape[0])
         target_total = int(eligible.sum())
         for k in top_k:

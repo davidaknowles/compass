@@ -128,10 +128,10 @@ def main() -> None:
     for analysis, ranking in rankings.items():
         ranking.to_csv(out_dir / f"{analysis}.ranked_genes.tsv", sep="\t", index=False)
         ranking.head(args.top_genes).to_csv(out_dir / f"{analysis}.top_genes.tsv", sep="\t", index=False)
-        positive = ranking.loc[ranking["score"] > 0, "ensembl"].drop_duplicates().tolist()
-        terms = run_gprofiler(positive, background, sources, args.timeout)
+        query = ranking.loc[ranking["score"] > 0, "ensembl"].drop_duplicates().head(args.top_genes).tolist()
+        terms = run_gprofiler(query, background, sources, args.timeout)
         if terms.empty:
-            terms = pd.DataFrame({"analysis": [analysis], "note": ["no positive genes or no enrichment results"]})
+            terms = pd.DataFrame({"analysis": [analysis], "note": ["no ranked genes or no enrichment results"]})
         else:
             terms.insert(0, "analysis", analysis)
         terms.to_csv(out_dir / f"{analysis}.gprofiler.tsv", sep="\t", index=False)
@@ -157,6 +157,7 @@ def main() -> None:
         "gtf": str(Path(args.gtf).expanduser()),
         "sources": sources,
         "background_size": len(background),
+        "gprofiler_query_size": args.top_genes,
         "analyses": sorted(rankings),
         "gprofiler_url": GPROFILER_URL,
     }
