@@ -89,6 +89,13 @@ plus myeloid proxy contexts for microglia:
 python scripts/run.py --abc-cell-types all
 ```
 
+Use the AD-proximal panel plus three peripheral controls (white adipose,
+gastrocnemius muscle, and uterus) with:
+
+```bash
+python scripts/run.py --abc-context-panel ad_with_controls
+```
+
 The run requires known sample sizes. The AD GWAS downloaded above contains
 `Nsum`/`Neff`, which are loaded automatically; otherwise pass a scalar sample
 size explicitly:

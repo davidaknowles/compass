@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,15 @@ DEFAULT_ABC_CELL_TYPES = (
     "CD14-positive_monocytes-Roadmap,"
     "THP-1_macrophage-VanBortle2017"
 )
+CONTROL_ABC_CELL_TYPES = (
+    "white_adipose-Loft2014,"
+    "gastrocnemius_medialis-ENCODE,"
+    "uterus-ENCODE"
+)
+ABC_CONTEXT_PANELS = {
+    "ad_proximal": DEFAULT_ABC_CELL_TYPES,
+    "ad_with_controls": f"{DEFAULT_ABC_CELL_TYPES},{CONTROL_ABC_CELL_TYPES}",
+}
 
 
 def _parse_lambdas(value: str) -> list[float]:
@@ -193,22 +203,73 @@ def _ld_manifest_path(r2_dir: Path) -> Path:
     raise FileNotFoundError(f"No LD manifest found in {r2_dir}")
 
 
+def _load_ld_blocks_from_dir(r2_dir: Path) -> list[LdChromosomeBlock]:
+    with open(_ld_manifest_path(r2_dir), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    reference_dir = manifest.get("reference_dir")
+    if reference_dir is not None:
+        reference = Path(reference_dir).expanduser()
+        if not reference.is_absolute():
+            reference = (r2_dir / reference).resolve()
+        if reference.resolve() == r2_dir.resolve():
+            raise ValueError(f"LD cache {r2_dir} references itself")
+        return _load_ld_blocks_from_dir(reference)
+    return [
+        LdChromosomeBlock(
+            chrom=int(item["chrom"]),
+            rows=np.load(r2_dir / item["rows"], allow_pickle=False),
+            R2=_load_csr_npz(r2_dir / item["matrix"]),
+        )
+        for item in manifest["blocks"]
+    ]
+
+
+def _ld_blocks_match_chromosome_rows(ld_blocks: list[LdChromosomeBlock], chrom: np.ndarray) -> bool:
+    if sum(block.rows.size for block in ld_blocks) != chrom.size:
+        return False
+    for block in ld_blocks:
+        expected_rows = np.flatnonzero(chrom == block.chrom)
+        if not np.array_equal(np.asarray(block.rows, dtype=np.int64), expected_rows):
+            return False
+    return True
+
+
+def _ld_diagnostics_for_dir(r2_dir: Path) -> pd.DataFrame:
+    name = r2_dir.name
+    for suffix in (".gwas.R2.chroms", ".R2.chroms"):
+        if name.endswith(suffix):
+            diagnostics = r2_dir.parent / f"{name.removesuffix(suffix)}.ld_diagnostics"
+            if _frame_path(diagnostics, ".parquet").exists() or _frame_path(diagnostics, ".pkl").exists():
+                return _read_frame(diagnostics)
+    return pd.DataFrame()
+
+
+def _find_compatible_allrow_ld(
+    cache_dir: Path,
+    chrom: np.ndarray,
+    r2_cutoff: float,
+) -> tuple[list[LdChromosomeBlock], pd.DataFrame, Path] | None:
+    """Load a verified all-row chromosome LD archive for a new ABC context panel."""
+
+    pattern = f"abc.allrows*.r2ge{r2_cutoff:g}.chromfp16.*.R2.chroms"
+    candidates = sorted(cache_dir.glob(pattern), key=lambda path: path.stat().st_mtime, reverse=True)
+    for candidate in candidates:
+        try:
+            blocks = _load_ld_blocks_from_dir(candidate)
+        except (FileNotFoundError, KeyError, OSError, ValueError):
+            continue
+        if _ld_blocks_match_chromosome_rows(blocks, chrom):
+            return blocks, _ld_diagnostics_for_dir(candidate), candidate.resolve()
+    return None
+
+
 def _load_dataset_cache(paths: dict[str, Path]):
     with _timed("load dataset cache"):
         A = sp.load_npz(paths["A"])
         R2 = sp.load_npz(paths["R2"]) if paths["R2"].exists() else None
         ld_blocks = None
         if R2 is None:
-            with open(_ld_manifest_path(paths["R2_dir"]), encoding="utf-8") as handle:
-                manifest = json.load(handle)
-            ld_blocks = [
-                LdChromosomeBlock(
-                    chrom=int(item["chrom"]),
-                    rows=np.load(paths["R2_dir"] / item["rows"], allow_pickle=False),
-                    R2=_load_csr_npz(paths["R2_dir"] / item["matrix"]),
-                )
-                for item in manifest["blocks"]
-            ]
+            ld_blocks = _load_ld_blocks_from_dir(paths["R2_dir"])
         arrays = np.load(paths["arrays"], allow_pickle=False)
         genes = _read_frame(paths["genes"])
         ld_diagnostics = _read_frame(paths["ld_diagnostics"])
@@ -263,6 +324,7 @@ def _write_dataset_cache(
     mechanisms: list[str],
     ld_diagnostics: pd.DataFrame,
     n_samples_source: str,
+    ld_reference_dir: Path | None = None,
 ) -> None:
     with _timed("write dataset cache"):
         sp.save_npz(paths["A"], dataset.A)
@@ -270,13 +332,19 @@ def _write_dataset_cache(
             sp.save_npz(paths["R2"], dataset.R2)
         else:
             paths["R2_dir"].mkdir(parents=True, exist_ok=True)
-            manifest = {"representation": "chromosome", "blocks": []}
-            for block in dataset.ld_blocks:
-                matrix_name = f"chr{block.chrom}.R2.fp16.npz"
-                rows_name = f"chr{block.chrom}.rows.npy"
-                _save_csr_npz(paths["R2_dir"] / matrix_name, block.R2, data_dtype=np.float16)
-                np.save(paths["R2_dir"] / rows_name, np.asarray(block.rows, dtype=np.int64))
-                manifest["blocks"].append({"chrom": int(block.chrom), "matrix": matrix_name, "rows": rows_name})
+            if ld_reference_dir is not None:
+                manifest = {
+                    "representation": "chromosome_reference",
+                    "reference_dir": os.path.relpath(ld_reference_dir.resolve(), paths["R2_dir"].resolve()),
+                }
+            else:
+                manifest = {"representation": "chromosome", "blocks": []}
+                for block in dataset.ld_blocks:
+                    matrix_name = f"chr{block.chrom}.R2.fp16.npz"
+                    rows_name = f"chr{block.chrom}.rows.npy"
+                    _save_csr_npz(paths["R2_dir"] / matrix_name, block.R2, data_dtype=np.float16)
+                    np.save(paths["R2_dir"] / rows_name, np.asarray(block.rows, dtype=np.int64))
+                    manifest["blocks"].append({"chrom": int(block.chrom), "matrix": matrix_name, "rows": rows_name})
             with open(paths["R2_dir"] / "manifest.json", "w", encoding="utf-8") as handle:
                 json.dump(manifest, handle, indent=2, sort_keys=True)
         np.savez_compressed(
@@ -324,7 +392,8 @@ def main() -> None:
     parser.add_argument("--top-assoc-dir", default=None)
     parser.add_argument("--annotation-source", default="abc", choices=["abc", "top_assoc"])
     parser.add_argument("--abc-path", default=None)
-    parser.add_argument("--abc-cell-types", default=DEFAULT_ABC_CELL_TYPES)
+    parser.add_argument("--abc-cell-types", default=None)
+    parser.add_argument("--abc-context-panel", default="ad_proximal", choices=sorted(ABC_CONTEXT_PANELS))
     parser.add_argument("--abc-score-column", default="ABC.Score")
     parser.add_argument("--abc-min-score", type=float, default=0.015)
     parser.add_argument("--cv-folds", type=int, default=10)
@@ -364,6 +433,11 @@ def main() -> None:
     parser.add_argument("--run-name", default=None)
     args = parser.parse_args()
 
+    if args.abc_cell_types is None:
+        args.abc_cell_types = ABC_CONTEXT_PANELS[args.abc_context_panel]
+    elif args.abc_context_panel != "ad_proximal":
+        parser.error("--abc-cell-types cannot be combined with a non-default --abc-context-panel")
+
     if args.cv_folds < 2:
         parser.error("--cv-folds must be at least 2")
     if not 0 < args.cv_r2_threshold <= 1:
@@ -392,6 +466,7 @@ def main() -> None:
 
     key = _cache_key(args, gwas_path)
     paths = _cache_paths(cache_dir, key)
+    ld_reference_dir = None
     if not args.rebuild_cache and not _dataset_cache_exists(paths):
         legacy_paths = _legacy_abc_cache_paths(cache_dir, args, gwas_path)
         if legacy_paths is not None and _dataset_cache_exists(legacy_paths):
@@ -454,19 +529,31 @@ def main() -> None:
                 n_genes=ann.genes.shape[0],
                 n_mechanisms=len(ann.mechanisms),
             )
-        with _timed(f"build chromosome UKBB LD R2 with {args.ld_jobs} jobs"):
-            ld_block_dicts, ld_diagnostics = build_ukbb_ld_r2_by_chromosome(
-                variants,
-                str(ld_dir),
-                n_jobs=args.ld_jobs,
-                progress_every=25,
-                r2_cutoff=args.ld_r2_cutoff,
-                dtype=np.float32,
-            )
-            ld_blocks = [
-                LdChromosomeBlock(chrom=int(block["chrom"]), rows=block["rows"], R2=block["R2"])
-                for block in ld_block_dicts
-            ]
+        reusable_ld = None
+        if args.annotation_source == "abc" and not args.rebuild_cache:
+            with _timed("find compatible all-row LD cache"):
+                reusable_ld = _find_compatible_allrow_ld(
+                    cache_dir,
+                    variants["chrom"].to_numpy(np.int64),
+                    args.ld_r2_cutoff,
+                )
+        if reusable_ld is not None:
+            ld_blocks, ld_diagnostics, ld_reference_dir = reusable_ld
+            print(f"[setup] reuse verified all-row LD archive {ld_reference_dir}", flush=True)
+        else:
+            with _timed(f"build chromosome UKBB LD R2 with {args.ld_jobs} jobs"):
+                ld_block_dicts, ld_diagnostics = build_ukbb_ld_r2_by_chromosome(
+                    variants,
+                    str(ld_dir),
+                    n_jobs=args.ld_jobs,
+                    progress_every=25,
+                    r2_cutoff=args.ld_r2_cutoff,
+                    dtype=np.float32,
+                )
+                ld_blocks = [
+                    LdChromosomeBlock(chrom=int(block["chrom"]), rows=block["rows"], R2=block["R2"])
+                    for block in ld_block_dicts
+                ]
 
         if args.n_samples is not None:
             n_samples: float | np.ndarray = float(args.n_samples)
@@ -503,7 +590,15 @@ def main() -> None:
         dataset.cv_score_groups = cv_score_groups
 
     if not _dataset_cache_exists(paths):
-        _write_dataset_cache(paths, dataset, genes, mechanisms, ld_diagnostics, n_samples_source)
+        _write_dataset_cache(
+            paths,
+            dataset,
+            genes,
+            mechanisms,
+            ld_diagnostics,
+            n_samples_source,
+            ld_reference_dir=ld_reference_dir,
+        )
 
     print(
         f"[setup] dataset variants={dataset.n_variants} params={dataset.n_params} "
@@ -605,6 +700,7 @@ def main() -> None:
         "annotation_source": args.annotation_source,
         "abc_path": str(abc_path) if args.annotation_source == "abc" else None,
         "abc_cell_types": args.abc_cell_types if args.annotation_source == "abc" else None,
+        "abc_context_panel": args.abc_context_panel if args.annotation_source == "abc" else None,
         "abc_score_column": args.abc_score_column if args.annotation_source == "abc" else None,
         "abc_min_score": args.abc_min_score if args.annotation_source == "abc" else None,
         "cv_folds": args.cv_folds if not args.no_cv else None,

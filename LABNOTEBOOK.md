@@ -215,3 +215,9 @@
 - Rank-one and nuclear coefficients have Pearson correlation `0.999984` and relative Frobenius difference `0.0139`; both are numerically rank one with `tau=0`.
 - For ordered g:Profiler, queries were limited to the top 100 positive ranked genes. The resulting terms are dominated by broad HPA tissue signatures, not AD- or brain-specific pathways; no mechanistic interpretation is supported.
 - Agora cross-reference uses HGNC-symbol matching when ABC target labels are symbols. Of 18,396 assayed genes, 865 overlap the 967 Agora nominated targets. At top 1,000 global genes, the nuclear fit has 68 targets (`p=0.00139`) and the rank-one fit has 69 (`p=0.000877`) versus about 47 expected. At top 100, both have 6 targets (`p=0.33`). These are unadjusted, exploratory overlaps.
+
+### Peripheral-control sensitivity analysis
+
+- Added the `ad_with_controls` ABC context panel: the six AD-proximal contexts plus `white_adipose-Loft2014`, `gastrocnemius_medialis-ENCODE`, and `uterus-ENCODE`.
+- New context-panel caches may reference a verified existing all-row LD archive instead of rebuilding or copying its chromosome FP16 blocks. Reuse requires exact agreement of every chromosome's dense row indices with the newly constructed all-variant row order.
+- The expanded-panel setup smoke test completed in 11.9 minutes and reused the existing LD archive. It produced 192,460 parameters, 2,825,623 annotation entries, and 165,905 eligible ten-fold validation rows; fold row counts remained balanced to within one variant.
