@@ -202,3 +202,9 @@
 - The selected full-data fit has `tau=0`, 2,181 positive genes, and 15,267 positive gene-context entries. Its total coefficient sum is `8.58e-05`.
 - The coefficient matrix is numerically rank one: its leading singular value is `8.63e-07`, while the remaining singular values are approximately `1e-14`. All seven contexts are positive for the same 2,181 genes, with nearly identical cross-gene coefficient ratios.
 - This fit identifies a weak aggregate mediated component but does not provide stable gene- or cell-type-specific prioritization. GSEA on this rank-one, near-uniform solution would not be biologically interpretable.
+
+### Factorized follow-up
+
+- The rank-1 follow-up is initialized from the leading non-negative SVD factors of the selected nuclear-norm solution and uses the same selected penalty (`lambda=100`).
+- The rank-1 residual coefficient now uses the same exact non-negative weighted least-squares coordinate update as the nuclear fit.
+- Agora's public nominated-target export (`/api/v1/genes/nominated`) contains 967 targets in the current download. Post-fit analysis will test target overlap for global and context-specific rankings alongside ordered g:Profiler enrichment.

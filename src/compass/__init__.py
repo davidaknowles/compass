@@ -9,6 +9,7 @@ _MODEL_EXPORTS = {
     "fit_nuclear_norm_path",
     "fit_rank1_path",
     "predict_factorized",
+    "rank1_factors_from_matrix",
 }
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "LdChromosomeBlock",
     "fit_nuclear_norm_path",
     "fit_rank1_path",
+    "rank1_factors_from_matrix",
     "load_abc_annotations",
     "load_gwas_sumstats",
     "load_top_assoc_annotations",

@@ -502,6 +502,27 @@ def _normalize_simplex(raw: torch.Tensor, constrain: bool) -> torch.Tensor:
     return torch.nn.functional.softplus(raw)
 
 
+def rank1_factors_from_matrix(B: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return non-negative rank-1 factors initialized from a coefficient matrix."""
+
+    B = np.maximum(np.asarray(B, dtype=np.float64), 0.0)
+    if B.ndim != 2:
+        raise ValueError("B must be a two-dimensional matrix")
+    left, singular_values, right = np.linalg.svd(B, full_matrices=False)
+    if singular_values.size == 0 or singular_values[0] <= 0:
+        return np.zeros(B.shape[0], dtype=np.float32), np.zeros(B.shape[1], dtype=np.float32)
+    left_factor = left[:, 0]
+    right_factor = right[0]
+    if left_factor.sum() < 0:
+        left_factor = -left_factor
+        right_factor = -right_factor
+    scale = np.sqrt(singular_values[0])
+    return (
+        np.maximum(left_factor * scale, 0.0).astype(np.float32),
+        np.maximum(right_factor * scale, 0.0).astype(np.float32),
+    )
+
+
 def fit_rank1_alt(
     dataset: CompassDataset,
     n_genes: int,
@@ -517,12 +538,14 @@ def fit_rank1_alt(
     device: str = "cpu",
     model_dtype: str = "float32",
     ld_chunk_nnz: int | None = 150_000_000,
+    progress_every: int = 0,
+    progress_label: str = "rank1",
 ) -> tuple[np.ndarray, float, list[float], dict]:
     """Fit rank-1 B = s w' with alternating Torch updates for s and w."""
 
     train_dtype = _torch_dtype(model_dtype)
     block_specs = _prepare_fit_blocks(dataset, device)
-    total_den = int(sum(block["rows"].size for block in block_specs))
+    total_den = int(sum(int(torch.count_nonzero(block["weight"]).item()) for block in block_specs))
 
     s_raw0 = np.full(n_genes, -8.0, dtype=np.float32) if init_s is None else np.log(np.expm1(np.maximum(init_s, 1e-12)))
     if init_w is None:
@@ -533,10 +556,10 @@ def fit_rank1_alt(
         w_raw0 = np.log(np.expm1(np.maximum(init_w, 1e-12)))
     s_raw = torch.as_tensor(s_raw0, dtype=train_dtype, device=device).clone().requires_grad_(True)
     w_raw = torch.as_tensor(w_raw0, dtype=train_dtype, device=device).clone().requires_grad_(True)
-    tau = torch.tensor(max(float(init_tau), 0.0), dtype=train_dtype, device=device, requires_grad=True)
+    tau = torch.tensor(max(float(init_tau), 0.0), dtype=train_dtype, device=device)
 
-    opt_s = torch.optim.Adam([s_raw, tau], lr=lr)
-    opt_w = torch.optim.Adam([w_raw, tau], lr=lr)
+    opt_s = torch.optim.Adam([s_raw], lr=lr)
+    opt_w = torch.optim.Adam([w_raw], lr=lr)
     losses: list[float] = []
     start = perf_counter()
     ld_stats = {
@@ -551,6 +574,8 @@ def fit_rank1_alt(
         opt = opt_s if it % 2 == 0 else opt_w
         opt.zero_grad()
         data_loss = 0.0
+        tau_numerator = 0.0
+        tau_denominator = 0.0
         ld_layout = _ld_torch_layout(device)
         ld_index_dtype = _ld_index_dtype(device)
         for block in block_specs:
@@ -590,13 +615,17 @@ def fit_rank1_alt(
                     _slice_vector(block["n_samples"], start, end),
                 )
                 residual = block["chisq"][start:end] - pred
-                loss_block = torch.sum(block["weight"][start:end] * residual.square()) / max(total_den, 1)
+                weight = block["weight"][start:end]
+                ld_term = _slice_vector(block["n_samples"], start, end) * block["ld_score"][start:end]
+                loss_block = torch.sum(weight * residual.square()) / max(total_den, 1)
                 data_loss += float(loss_block.detach().cpu())
+                tau_numerator += float(torch.sum(weight * ld_term * (residual + ld_term * tau)).detach().cpu())
+                tau_denominator += float(torch.sum(weight * ld_term.square()).detach().cpu())
                 loss_block.backward()
                 if torch.device(device).type == "cuda" and torch.cuda.is_available():
                     torch.cuda.synchronize()
                 ld_stats["ld_eval_backward_seconds"] += perf_counter() - eval_start
-                del R2_t, pred, residual, loss_block, B
+                del R2_t, pred, residual, loss_block, B, ld_term
             del R2_cpu
         s = torch.nn.functional.softplus(s_raw)
         w = _normalize_simplex(w_raw, constrain_w_simplex)
@@ -604,13 +633,22 @@ def fit_rank1_alt(
         reg = lambda_value * torch.linalg.norm(B, ord="nuc")
         reg.backward()
         opt.step()
+        tau_next = max(0.0, tau_numerator / tau_denominator) if tau_denominator > 0 else 0.0
+        data_loss -= tau_denominator * (float(tau.detach().cpu()) - tau_next) ** 2 / max(total_den, 1)
         with torch.no_grad():
-            tau.clamp_(min=0.0)
-        losses.append(data_loss + float(reg.detach().cpu()))
-        with torch.no_grad():
+            tau.fill_(tau_next)
             B_now = torch.outer(torch.nn.functional.softplus(s_raw), _normalize_simplex(w_raw, constrain_w_simplex))
+            delta = _relative_change(B_now, last_B) if last_B is not None else torch.tensor(float("inf"), device=device)
+        objective = data_loss + float(reg.detach().cpu())
+        losses.append(objective)
+        if progress_every and (it == 0 or (it + 1) % progress_every == 0):
+            print(
+                f"[fit] {progress_label} lambda={lambda_value:g} iteration={it + 1} "
+                f"objective={objective:.6g} relative_change={float(delta.detach().cpu()):.3g}",
+                flush=True,
+            )
+        with torch.no_grad():
             if last_B is not None:
-                delta = _relative_change(B_now, last_B)
                 if it > 20 and float(delta.detach().cpu()) < tol:
                     break
             last_B = B_now.detach().clone()
@@ -865,6 +903,7 @@ def fit_rank1_path(
     n_mechanisms: int,
     lambdas: list[float],
     cv: bool = True,
+    initial_B: np.ndarray | None = None,
     **kwargs,
 ) -> FitResult:
     ordered = sorted([float(l) for l in lambdas], reverse=True)
@@ -872,6 +911,11 @@ def fit_rank1_path(
     best = min(cv_scores, key=cv_scores.get) if cv_scores else ordered[-1]
     init_s = None
     init_w = None
+    if initial_B is not None:
+        expected_shape = (n_genes, n_mechanisms)
+        if np.asarray(initial_B).shape != expected_shape:
+            raise ValueError(f"initial_B must have shape {expected_shape}")
+        init_s, init_w = rank1_factors_from_matrix(initial_B)
     init_tau = 1e-8
     losses_all: list[float] = []
     cv_folds = None
@@ -880,6 +924,7 @@ def fit_rank1_path(
     metadata = {
         "cv_method": "ld_component" if cv else None,
         "cv_folds": cv_folds,
+        "initialization": "nuclear_rank1_svd" if initial_B is not None else "default",
     }
     B = None
     tau = init_tau

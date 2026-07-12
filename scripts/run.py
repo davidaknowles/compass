@@ -20,7 +20,7 @@ from compass.ld import (
     filter_variants_to_ukbb_ld,
     make_ld_component_cv_groups,
 )
-from compass.model import CompassDataset, LdChromosomeBlock, fit_nuclear_norm_path
+from compass.model import CompassDataset, LdChromosomeBlock, fit_nuclear_norm_path, fit_rank1_path
 
 
 DEFAULT_DATA_ROOT = Path.home() / "knowles_lab" / "data" / "compass"
@@ -302,6 +302,22 @@ def _write_dataset_cache(
             json.dump(mechanisms, handle)
 
 
+def _load_initial_B(path: str | Path, genes: pd.DataFrame, mechanisms: list[str]) -> np.ndarray:
+    initial = pd.read_csv(Path(path).expanduser(), sep="\t", index_col=0)
+    initial.index = initial.index.astype(str)
+    initial.columns = initial.columns.astype(str)
+    expected_genes = genes["gene"].astype(str)
+    missing_mechanisms = set(mechanisms).difference(initial.columns)
+    if missing_mechanisms:
+        raise ValueError(f"Initial B is missing mechanisms: {sorted(missing_mechanisms)}")
+    return (
+        initial.reindex(index=expected_genes, columns=mechanisms, fill_value=0.0)
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+        .to_numpy(np.float32)
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run genome-wide COMPASS with UKBB LD.")
     parser.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
@@ -331,6 +347,8 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-8)
     parser.add_argument("--tol", type=float, default=1e-2)
     parser.add_argument("--no-cv", action="store_true")
+    parser.add_argument("--method", default="nuclear", choices=["nuclear", "rank1"])
+    parser.add_argument("--init-b-tsv", default=None)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--model-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
     parser.add_argument("--svd-method", default="auto", choices=["auto", "exact", "randomized"])
@@ -352,6 +370,8 @@ def main() -> None:
         parser.error("--cv-r2-threshold must be in (0, 1]")
     if args.cv_r2_threshold < args.ld_r2_cutoff:
         parser.error("--cv-r2-threshold cannot be below --ld-r2-cutoff")
+    if args.method == "rank1" and args.init_b_tsv is None:
+        parser.error("--method rank1 requires --init-b-tsv")
 
     data_root = Path(args.data_root).expanduser()
     top_assoc_dir = Path(args.top_assoc_dir).expanduser() if args.top_assoc_dir else data_root / "raw" / "zenodo_top_assoc"
@@ -505,26 +525,44 @@ def main() -> None:
         return
 
     with _timed("fit"):
-        fit = fit_nuclear_norm_path(
-            dataset,
-            n_genes=genes.shape[0],
-            n_mechanisms=len(mechanisms),
-            lambdas=args.lambdas,
-            max_lambda_extensions=args.max_lambda_extensions,
-            lambda_extension_factor=args.lambda_extension_factor,
-            cv=not args.no_cv,
-            lr=args.lr,
-            max_iter=args.max_iter,
-            progress_every=args.progress_every,
-            tol=args.tol,
-            device=device,
-            model_dtype=args.model_dtype,
-            svd_method=args.svd_method,
-            svd_rank=args.svd_rank,
-            svd_oversamples=args.svd_oversamples,
-            svd_n_iter=args.svd_n_iter,
-            ld_chunk_nnz=args.ld_chunk_nnz,
-        )
+        if args.method == "nuclear":
+            fit = fit_nuclear_norm_path(
+                dataset,
+                n_genes=genes.shape[0],
+                n_mechanisms=len(mechanisms),
+                lambdas=args.lambdas,
+                max_lambda_extensions=args.max_lambda_extensions,
+                lambda_extension_factor=args.lambda_extension_factor,
+                cv=not args.no_cv,
+                lr=args.lr,
+                max_iter=args.max_iter,
+                progress_every=args.progress_every,
+                tol=args.tol,
+                device=device,
+                model_dtype=args.model_dtype,
+                svd_method=args.svd_method,
+                svd_rank=args.svd_rank,
+                svd_oversamples=args.svd_oversamples,
+                svd_n_iter=args.svd_n_iter,
+                ld_chunk_nnz=args.ld_chunk_nnz,
+            )
+        else:
+            fit = fit_rank1_path(
+                dataset,
+                n_genes=genes.shape[0],
+                n_mechanisms=len(mechanisms),
+                lambdas=args.lambdas,
+                cv=not args.no_cv,
+                initial_B=_load_initial_B(args.init_b_tsv, genes, mechanisms),
+                lr=args.lr,
+                max_iter=args.max_iter,
+                tol=args.tol,
+                device=device,
+                model_dtype=args.model_dtype,
+                ld_chunk_nnz=args.ld_chunk_nnz,
+                progress_every=args.progress_every,
+                progress_label="full",
+            )
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_name = args.run_name or f"compass-{stamp}"
@@ -542,6 +580,7 @@ def main() -> None:
     ld_diagnostics.to_csv(f"{prefix}.ld_diagnostics.tsv", sep="\t", index=False)
     metadata = {
         "method": fit.method,
+        "init_b_tsv": str(Path(args.init_b_tsv).expanduser()) if args.init_b_tsv else None,
         "best_lambda": fit.best_lambda,
         "cv_scores": fit.cv_scores,
         "metadata": fit.metadata,
