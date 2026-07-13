@@ -184,6 +184,19 @@ python scripts/run_gsea.py \
   --out-dir ~/knowles_lab/data/compass/results/<run-name>.gsea
 ```
 
+Run the ABC/UKBB-LD recovery simulation study (ten independent seeds at each
+of `N_eff=100000` and `200000`):
+
+```bash
+bash scripts/slurm/submit_abc_recovery_simulation.sh
+```
+
+The study uses bipolar neuron and CD14 monocyte ABC annotations as causal
+contexts (70:30 of total `h2=0.20`) and adipose, muscle, and uterus as null
+controls. It selects 10% of ABC-positive variants per causal context, generates
+model-matched noncentral chi-square statistics with the real UKBB `R2` blocks,
+and runs the same LD-component CV used for the real-data fit.
+
 Compare precomputed `T = R2 @ A` against the factorized representation:
 
 ```python
