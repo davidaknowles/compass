@@ -18,6 +18,7 @@ def _slug(value: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results-dir", required=True)
+    parser.add_argument("--max-seed", type=int, default=2)
     args = parser.parse_args()
     results_dir = Path(args.results_dir).expanduser()
     metadata_paths = sorted(results_dir.glob("n*-seed*.metadata.json"))
@@ -25,6 +26,9 @@ def main() -> None:
         raise FileNotFoundError(f"No per-seed metadata found in {results_dir}")
 
     records = [json.loads(path.read_text()) for path in metadata_paths]
+    records = [record for record in records if int(record["seed"]) <= args.max_seed]
+    if not records:
+        raise ValueError("No simulation metadata remained after seed filtering")
     rows = []
     mass_rows = []
     for record in records:

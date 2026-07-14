@@ -7,6 +7,7 @@ import scipy.sparse as sp
 
 from compass.model import LdChromosomeBlock
 from compass.simulation import generate_sparse_context_truth, ld_propagate, simulate_noncentral_chisq
+from compass.sldsc import fit_sldsc_wls
 
 
 class SimulationTest(unittest.TestCase):
@@ -29,6 +30,16 @@ class SimulationTest(unittest.TestCase):
         np.testing.assert_allclose(chisq_a, chisq_b)
         np.testing.assert_allclose(nonc_a, nonc_b)
         np.testing.assert_allclose(nonc_a, [10_500, 4_500])
+
+    def test_sldsc_recovers_a_toy_infinitesimal_model(self):
+        matrix = sp.identity(4, format="csr", dtype=np.float32)
+        block = LdChromosomeBlock(chrom=1, rows=np.arange(4), R2=matrix)
+        scores = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]])
+        n_eff = 1_000.0
+        coefficients = np.array([0.10, 0.20, 0.03])
+        chisq = 1.0 + n_eff * (scores @ coefficients[:2] + coefficients[2])
+        result = fit_sldsc_wls([block], scores, ["first", "second"], chisq, n_eff)
+        np.testing.assert_allclose(result.coefficients, coefficients, rtol=1e-7, atol=1e-7)
 
 
 if __name__ == "__main__":

@@ -14,4 +14,5 @@ source /gpfs/commons/home/daknowles/venv/torchfix/bin/activate
 export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
 
 python scripts/summarize_abc_recovery_simulations.py \
-  --results-dir /gpfs/commons/home/daknowles/knowles_lab/data/compass/results/abc_recovery_simulation
+  --results-dir /gpfs/commons/home/daknowles/knowles_lab/data/compass/results/abc_recovery_simulation \
+  --max-seed 2
