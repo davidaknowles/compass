@@ -184,7 +184,7 @@ python scripts/run_gsea.py \
   --out-dir ~/knowles_lab/data/compass/results/<run-name>.gsea
 ```
 
-Run the ABC/UKBB-LD recovery simulation study (ten independent seeds at each
+Run the ABC/UKBB-LD recovery simulation study (three independent seeds at each
 of `N_eff=100000` and `200000`):
 
 ```bash
