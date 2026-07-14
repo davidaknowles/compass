@@ -32,9 +32,9 @@ class SimulationTest(unittest.TestCase):
         np.testing.assert_allclose(nonc_a, [10_500, 4_500])
 
     def test_sldsc_recovers_a_toy_infinitesimal_model(self):
-        matrix = sp.identity(4, format="csr", dtype=np.float32)
-        block = LdChromosomeBlock(chrom=1, rows=np.arange(4), R2=matrix)
-        scores = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]])
+        matrix = sp.identity(6, format="csr", dtype=np.float32)
+        block = LdChromosomeBlock(chrom=1, rows=np.arange(6), R2=matrix)
+        scores = np.array([[1.0, 0.0], [0.0, 1.0], [2.0, 0.0], [0.0, 3.0], [0.5, 0.5], [1.0, 2.0]])
         n_eff = 1_000.0
         coefficients = np.array([0.10, 0.20, 0.03])
         chisq = 1.0 + n_eff * (scores @ coefficients[:2] + coefficients[2])
