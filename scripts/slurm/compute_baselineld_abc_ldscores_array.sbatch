@@ -27,7 +27,7 @@ export PYTHONPATH="$HOME/knowles_lab/software/ldsc_py2_deps:$HOME/knowles_lab/so
 python "$HOME/knowles_lab/software/ldsc/ldsc.py" \
   --l2 \
   --bfile "${bim%.bim}" \
-  --annot "$input_dir/annotation/abc_baselineld.${chrom}" \
+  --annot "$input_dir/annotation/abc_baselineld.${chrom}.annot.gz" \
   --print-snps "$input_dir/regression_snps/${chrom}.snps" \
   --ld-wind-cm 1 \
   --maf 0.05 \
