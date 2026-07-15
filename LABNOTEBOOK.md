@@ -235,3 +235,8 @@
 - All three retained simulations completed at each sample size. The nuclear model recovered the two causal contexts as the top two in 2/3 replicates at `N_eff=100000` and 3/3 at `N_eff=200000`, but normalized causal mass was only about 46--47% in both settings; null controls retained 53--54%.
 - The joint infinitesimal baseline assigned positive implied annotated heritability to the two causal contexts and near-zero or negative estimates to controls. Its total implied heritability is not calibrated because the truth is deliberately sparse whereas the baseline assumes infinitesimal annotation-wide effects; its signed residual LD-score estimate was negative.
 - On the real AD summary statistics, the same joint baseline has small, mixed signed context coefficients and a negative residual term. It should be treated as a comparative annotation ranking rather than a calibrated AD heritability decomposition until standard LDSC weighting and intercept treatment are added.
+
+### Official LDSC follow-up
+
+- Added an official LDSC input writer that exports the gene-summed ABC annotations, an all-SNP baseline annotation, the matching UKBB `R2` LD scores, regression-weight LD scores, annotation totals, and AD summary statistics in the formats consumed by `ldsc.py --h2`.
+- The official engine provides LDSC's native free intercept, iterative heteroskedastic weights, and block-jackknife uncertainty. This comparison is matched to the current UKBB panel and `r2 >= 0.01` representation; it is not a baseline-LD-adjusted analysis because compatible baseline-LD annotations have not yet been added.
