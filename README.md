@@ -40,6 +40,12 @@ downloaded from the CNCR/SURF data share. The eQTL top-association files are fro
 Zenodo record `15860973`. The default annotation source is now public ABC
 enhancer-gene scores from Nasser et al. 2021.
 
+Glass Lab v2 brain-cell ABC predictions can be prepared for the hg19 GWAS and
+LD references with `scripts/prepare_glass_abc_v2.py`. The prepared panel
+contains astrocyte, microglia, neuron, and oligodendrocyte annotations and is
+used by `scripts/slurm/run_glass_abc_compass_b6k.sbatch` and the matching
+BaselineLD-adjusted S-LDSC scripts.
+
 ## Data Sources
 
 The downloader uses these public sources:

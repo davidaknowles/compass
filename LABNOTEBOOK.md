@@ -257,3 +257,9 @@
 - Cloned `nottalexi/brain-cell-type-peak-files` at commit `c09bfe9` using SSH. Its hg19 peak calls cover NeuN neurons, PU1 microglia, Olig2 oligodendrocytes, and LHX2 astrocytes for ATAC-seq, H3K27ac, and H3K4me3.
 - Added a separate binary-peak BaselineLD workflow. It fits all 12 assay-by-cell-type annotations jointly, preserving the exact 1000G BIM row order and the existing HapMap3/BaselineLD overlap-annotation procedure. It intentionally replaces, rather than combines with, the ABC annotations.
 - The joint peak/BaselineLD fit completed on 1,185,548 matched regression SNPs with observed-scale `h2=0.0151 (SE 0.0022)` and intercept `1.0160 (SE 0.0146)`. PU1 microglial H3K27ac was the only custom annotation with a nominal conditional coefficient: `3.26e-8 (SE 1.47e-8; z=2.22; p=0.026)`. It covered 2.72% of SNPs, had 14.7-fold enrichment (`SE 3.82; p=1.36e-4`), and accounted for 40.0% of fitted h2 (`SE 10.4%`). Its 12-test Benjamini--Hochberg coefficient q-value is about 0.31; this is follow-up evidence, not a corrected discovery. The remaining 11 assay-by-cell-type annotations were unresolved.
+
+## 2026-07-15 Glass Lab v2 brain ABC follow-up
+
+- The Glass Lab v2 files provide four matched brain-cell predictions: astrocyte, microglia, neuron, and oligodendrocyte.
+- Their prediction coordinates are GRCh38, whereas the AD GWAS, UKBB LD, and 1000 Genomes BaselineLD reference used here are hg19. `src/compass/glass_abc.py` therefore lifts the BED intervals through the GRCh38-to-hg19 chain before either method consumes them.
+- `scripts/prepare_glass_abc_v2.py` emits a compact common ABC table containing only interval, target-gene, score, and cell-type fields. COMPASS and BaselineLD-adjusted S-LDSC use this identical table, eliminating an annotation-definition difference between the analyses.

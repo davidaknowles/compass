@@ -52,6 +52,32 @@ def write_abc_annotations(
 
     if set(contexts) != set(ABC_COLUMN_NAMES):
         raise ValueError("contexts must match the configured five-context ABC panel")
+    return write_continuous_abc_annotations(
+        bim_by_chrom,
+        abc_path,
+        contexts,
+        output_dir,
+        column_names=[ABC_COLUMN_NAMES[context] for context in contexts],
+        min_score=min_score,
+        prefix="abc_baselineld",
+    )
+
+
+def write_continuous_abc_annotations(
+    bim_by_chrom: dict[int, pd.DataFrame],
+    abc_path: str | Path,
+    contexts: list[str],
+    output_dir: str | Path,
+    column_names: list[str],
+    min_score: float = 0.015,
+    prefix: str = "abc_baselineld",
+) -> dict[str, int]:
+    """Write continuous gene-summed ABC annotations in exact BIM row order."""
+
+    if len(contexts) != len(column_names) or not contexts:
+        raise ValueError("contexts and column_names must be non-empty and have equal length")
+    if len(set(contexts)) != len(contexts) or len(set(column_names)) != len(column_names):
+        raise ValueError("contexts and column_names must be unique")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     all_bim = pd.concat(
@@ -84,7 +110,7 @@ def write_abc_annotations(
     score_frame = annotation.variants[["variant_id"]].copy()
     score_frame["chrom"] = score_frame["variant_id"].str.extract(r"^chr(\d+):", expand=False).astype(np.int64)
     score_frame["pos"] = score_frame["variant_id"].str.extract(r":(\d+)$", expand=False).astype(np.int64)
-    score_columns = [ABC_COLUMN_NAMES[context] for context in contexts]
+    score_columns = column_names
     score_frame[score_columns] = scores
     if score_frame.duplicated(["chrom", "pos"]).any():
         raise ValueError("ABC variant coordinates must be unique after annotation loading")
@@ -102,8 +128,8 @@ def write_abc_annotations(
             raise ValueError(f"ABC annotation row count changed on chromosome {chrom}")
         frame[score_columns] = frame[score_columns].fillna(0.0).astype(np.float32)
         frame = frame[["CHR", "SNP", "CM", "BP", *score_columns]]
-        prefix = output_dir / f"abc_baselineld.{chrom}"
-        frame.to_csv(f"{prefix}.annot.gz", sep="\t", index=False, compression="gzip")
+        chromosome_prefix = output_dir / f"{prefix}.{chrom}"
+        frame.to_csv(f"{chromosome_prefix}.annot.gz", sep="\t", index=False, compression="gzip")
         counts[str(chrom)] = int(frame.shape[0])
     return counts
 

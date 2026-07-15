@@ -26,4 +26,4 @@ python "$HOME/knowles_lab/software/ldsc/ldsc.py" \
   --overlap-annot \
   --print-coefficients \
   --n-blocks 200 \
-  --out "$output_dir/ad_peaks_joint"
+  --out "$output_dir/ad_joint"
