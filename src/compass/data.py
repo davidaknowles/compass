@@ -285,6 +285,138 @@ def load_abc_annotations(
     )
 
 
+def _read_bed_intervals(path: str | Path) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    peaks = pd.read_csv(path, sep="\t", header=None, usecols=[0, 1, 2], names=["chrom", "start", "end"])
+    peaks["chrom"] = _normalize_chrom(peaks["chrom"])
+    peaks["start"] = pd.to_numeric(peaks["start"], errors="coerce")
+    peaks["end"] = pd.to_numeric(peaks["end"], errors="coerce")
+    peaks = peaks.dropna().astype({"chrom": np.int64, "start": np.int64, "end": np.int64})
+    peaks = peaks[peaks["chrom"].between(1, 22) & peaks["end"].gt(peaks["start"])]
+    intervals: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for chrom, group in peaks.groupby("chrom", sort=False):
+        ordered = group.sort_values(["start", "end"], kind="mergesort")
+        starts = ordered["start"].to_numpy(np.int64)
+        intervals[int(chrom)] = (starts, np.maximum.accumulate(ordered["end"].to_numpy(np.int64)))
+    return intervals
+
+
+def _positions_in_bed_intervals(
+    positions: np.ndarray,
+    intervals: tuple[np.ndarray, np.ndarray] | None,
+) -> np.ndarray:
+    if intervals is None or positions.size == 0:
+        return np.zeros(positions.size, dtype=bool)
+    starts, max_ends = intervals
+    previous = np.searchsorted(starts, positions, side="right") - 1
+    valid = previous >= 0
+    result = np.zeros(positions.size, dtype=bool)
+    result[valid] = positions[valid] <= max_ends[previous[valid]]
+    return result
+
+
+def load_open_chromatin_tss_annotations(
+    peak_files: dict[str, str | Path],
+    tss_path: str | Path,
+    gwas: pd.DataFrame,
+    tss_window: int = 100_000,
+    add_intercept: bool = True,
+) -> AnnotationData:
+    """Link ATAC-overlapping variants to expressed cell-specific genes by TSS distance.
+
+    Every usable GWAS variant is retained. A variant receives a binary
+    gene-context annotation only when it lies in the corresponding ATAC peak
+    and the gene's cell-specific expressed TSS is within ``tss_window`` bases.
+    """
+
+    if not peak_files:
+        raise ValueError("peak_files must not be empty")
+    if tss_window < 0:
+        raise ValueError("tss_window must be non-negative")
+    if "chrom" not in gwas.columns or "pos" not in gwas.columns:
+        raise ValueError("Open-chromatin annotations require GWAS chromosome and position columns")
+
+    variants = gwas.dropna(subset=["chrom", "pos"]).copy()
+    variants["chrom"] = _normalize_chrom(variants["chrom"])
+    variants["pos"] = pd.to_numeric(variants["pos"], errors="coerce")
+    variants = variants[variants["chrom"].between(1, 22) & variants["pos"].notna()].copy()
+    variants["chrom"] = variants["chrom"].astype(int)
+    variants["pos"] = variants["pos"].astype(int)
+    if "variant_id" not in variants.columns:
+        variants["variant_id"] = _variant_id(variants["chrom"], variants["pos"])
+    if "snp" in variants.columns:
+        variants["MarkerID"] = variants["snp"].astype(str)
+    else:
+        variants["MarkerID"] = variants["variant_id"].astype(str)
+    variants = variants.drop_duplicates("variant_id").sort_values(["chrom", "pos", "variant_id"]).reset_index(drop=True)
+    variants["variant_idx"] = np.arange(variants.shape[0], dtype=np.int64)
+
+    mechanisms = list(peak_files)
+    tss = pd.read_csv(tss_path, sep="\t", compression="infer", usecols=["chrom", "tss", "gene", "CellType"])
+    tss["chrom"] = _normalize_chrom(tss["chrom"])
+    tss["tss"] = pd.to_numeric(tss["tss"], errors="coerce")
+    tss = tss.dropna(subset=["chrom", "tss", "gene", "CellType"])
+    tss = tss[tss["chrom"].between(1, 22) & tss["CellType"].isin(mechanisms)].copy()
+    tss["chrom"] = tss["chrom"].astype(int)
+    tss["tss"] = tss["tss"].astype(int)
+    tss = tss[tss["tss"].gt(0)].drop_duplicates(["chrom", "tss", "gene", "CellType"])
+    missing_mechanisms = set(mechanisms).difference(tss["CellType"])
+    if missing_mechanisms:
+        raise ValueError(f"No expressed TSS records for requested contexts: {sorted(missing_mechanisms)}")
+
+    genes = pd.DataFrame({"gene": sorted(tss["gene"].astype(str).unique())})
+    genes["gene_idx"] = np.arange(genes.shape[0], dtype=np.int64)
+    gene_to_idx = dict(zip(genes["gene"], genes["gene_idx"]))
+    tss["gene_idx"] = tss["gene"].astype(str).map(gene_to_idx).astype(np.int64)
+    mechanism_to_idx = {name: index + int(add_intercept) for index, name in enumerate(mechanisms)}
+
+    triples_by_block: list[pd.DataFrame] = []
+    for mechanism, peak_path in peak_files.items():
+        intervals = _read_bed_intervals(peak_path)
+        mechanism_idx = mechanism_to_idx[mechanism]
+        cell_tss = tss[tss["CellType"].eq(mechanism)]
+        for chrom, var_block in variants.groupby("chrom", sort=False):
+            positions = var_block["pos"].to_numpy(np.int64)
+            contained = _positions_in_bed_intervals(positions, intervals.get(int(chrom)))
+            if not contained.any():
+                continue
+            peak_positions = positions[contained]
+            peak_variant_idx = var_block["variant_idx"].to_numpy(np.int64)[contained]
+            tss_block = cell_tss[cell_tss["chrom"].eq(int(chrom))].sort_values("tss", kind="mergesort")
+            if tss_block.empty:
+                continue
+            variant_parts: list[np.ndarray] = []
+            gene_parts: list[np.ndarray] = []
+            for row in tss_block[["tss", "gene_idx"]].itertuples(index=False):
+                lo = np.searchsorted(peak_positions, int(row.tss) - tss_window, side="left")
+                hi = np.searchsorted(peak_positions, int(row.tss) + tss_window, side="right")
+                if hi > lo:
+                    count = hi - lo
+                    variant_parts.append(peak_variant_idx[lo:hi])
+                    gene_parts.append(np.full(count, int(row.gene_idx), dtype=np.int64))
+            if variant_parts:
+                variant_idx = np.concatenate(variant_parts)
+                triples_by_block.append(
+                    pd.DataFrame(
+                        {
+                            "variant_idx": variant_idx,
+                            "gene_idx": np.concatenate(gene_parts),
+                            "mechanism_idx": np.full(variant_idx.size, mechanism_idx, dtype=np.int64),
+                            "value": np.ones(variant_idx.size, dtype=np.float32),
+                        }
+                    )
+                )
+    if not triples_by_block:
+        raise ValueError("No ATAC-overlapping variants had an expressed TSS within the requested window")
+    triples = pd.concat(triples_by_block, ignore_index=True)
+    if add_intercept:
+        intercept = triples[["variant_idx", "gene_idx"]].drop_duplicates().copy()
+        intercept["mechanism_idx"] = 0
+        intercept["value"] = np.float32(1.0)
+        triples = pd.concat([triples, intercept], ignore_index=True)
+    triples = triples.groupby(["variant_idx", "gene_idx", "mechanism_idx"], as_index=False)["value"].max()
+    return AnnotationData(variants=variants, genes=genes, mechanisms=(['intercept'] if add_intercept else []) + mechanisms, triples=triples)
+
+
 def load_gwas_sumstats(path: str | Path) -> pd.DataFrame:
     """Load GWAS summary statistics with flexible column normalization."""
 

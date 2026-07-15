@@ -14,7 +14,13 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
-from compass.data import load_abc_annotations, load_gwas_sumstats, load_top_assoc_annotations, make_training_table
+from compass.data import (
+    load_abc_annotations,
+    load_gwas_sumstats,
+    load_open_chromatin_tss_annotations,
+    load_top_assoc_annotations,
+    make_training_table,
+)
 from compass.ld import (
     annotation_triples_to_csr,
     build_ukbb_ld_r2_by_chromosome,
@@ -42,6 +48,12 @@ CONTROL_ABC_CELL_TYPES = (
 ABC_CONTEXT_PANELS = {
     "ad_proximal": DEFAULT_ABC_CELL_TYPES,
     "ad_with_controls": f"{DEFAULT_ABC_CELL_TYPES},{CONTROL_ABC_CELL_TYPES}",
+}
+OPEN_CHROMATIN_PEAK_FILES = {
+    "astrocyte": ("ATAC", "LHX2_optimal_peak_IDR_ENCODE.ATAC.bed"),
+    "microglia": ("ATAC", "PU1_optimal_peak_IDR_ENCODE.ATAC.bed"),
+    "neuron": ("ATAC", "NeuN_optimal_peak_IDR_ENCODE.ATAC.bed"),
+    "oligodendrocyte": ("ATAC", "Olig2_optimal_peak_IDR_ENCODE.ATAC.bed"),
 }
 
 
@@ -72,7 +84,13 @@ def _timed(label: str):
     print(f"[setup] done {label}: {perf_counter() - start:.2f}s", flush=True)
 
 
-def _cache_key(args, gwas_path: Path, abc_path: Path) -> str:
+def _cache_key(
+    args,
+    gwas_path: Path,
+    abc_path: Path,
+    open_chromatin_tss_path: Path,
+    open_chromatin_peaks_root: Path,
+) -> str:
     intercept = "intercept" if not args.no_intercept else "nointercept"
     n_samples = "gwas" if args.n_samples is None else f"n{args.n_samples:g}"
     if args.annotation_source == "abc":
@@ -85,6 +103,10 @@ def _cache_key(args, gwas_path: Path, abc_path: Path) -> str:
             f"abc.allrows.{args.abc_score_column}.min{args.abc_min_score:g}."
             f"r2ge{args.ld_r2_cutoff:g}.chromfp16.{cell_types}.{annotation_path}"
         )
+    elif args.annotation_source == "open_chromatin":
+        source_paths = f"{open_chromatin_tss_path.resolve()}|{open_chromatin_peaks_root.resolve()}"
+        source_hash = hashlib.sha1(source_paths.encode("utf-8")).hexdigest()[:12]
+        source = f"openchromatin.tsswin{args.open_chromatin_tss_window:g}.{source_hash}"
     else:
         source = f"topassoc.{args.annotation_value}"
     return f"{source}.{intercept}.{gwas_path.name}.{n_samples}"
@@ -391,12 +413,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run genome-wide COMPASS with UKBB LD.")
     parser.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
     parser.add_argument("--top-assoc-dir", default=None)
-    parser.add_argument("--annotation-source", default="abc", choices=["abc", "top_assoc"])
+    parser.add_argument("--annotation-source", default="abc", choices=["abc", "open_chromatin", "top_assoc"])
     parser.add_argument("--abc-path", default=None)
     parser.add_argument("--abc-cell-types", default=None)
     parser.add_argument("--abc-context-panel", default="ad_proximal", choices=sorted(ABC_CONTEXT_PANELS))
     parser.add_argument("--abc-score-column", default="ABC.Score")
     parser.add_argument("--abc-min-score", type=float, default=0.015)
+    parser.add_argument("--open-chromatin-tss", default=None)
+    parser.add_argument("--open-chromatin-peaks-root", default=None)
+    parser.add_argument("--open-chromatin-tss-window", type=int, default=100_000)
     parser.add_argument("--cv-folds", type=int, default=10)
     parser.add_argument("--cv-r2-threshold", type=float, default=0.01)
     parser.add_argument("--gwas", default=None)
@@ -434,10 +459,11 @@ def main() -> None:
     parser.add_argument("--run-name", default=None)
     args = parser.parse_args()
 
-    if args.abc_cell_types is None:
-        args.abc_cell_types = ABC_CONTEXT_PANELS[args.abc_context_panel]
-    elif args.abc_context_panel != "ad_proximal":
-        parser.error("--abc-cell-types cannot be combined with a non-default --abc-context-panel")
+    if args.annotation_source == "abc":
+        if args.abc_cell_types is None:
+            args.abc_cell_types = ABC_CONTEXT_PANELS[args.abc_context_panel]
+        elif args.abc_context_panel != "ad_proximal":
+            parser.error("--abc-cell-types cannot be combined with a non-default --abc-context-panel")
 
     if args.cv_folds < 2:
         parser.error("--cv-folds must be at least 2")
@@ -445,12 +471,24 @@ def main() -> None:
         parser.error("--cv-r2-threshold must be in (0, 1]")
     if args.cv_r2_threshold < args.ld_r2_cutoff:
         parser.error("--cv-r2-threshold cannot be below --ld-r2-cutoff")
+    if args.open_chromatin_tss_window < 0:
+        parser.error("--open-chromatin-tss-window must be non-negative")
     if args.method == "rank1" and args.init_b_tsv is None:
         parser.error("--method rank1 requires --init-b-tsv")
 
     data_root = Path(args.data_root).expanduser()
     top_assoc_dir = Path(args.top_assoc_dir).expanduser() if args.top_assoc_dir else data_root / "raw" / "zenodo_top_assoc"
     abc_path = Path(args.abc_path).expanduser() if args.abc_path else data_root / "raw" / "abc" / DEFAULT_ABC_NAME
+    open_chromatin_tss_path = (
+        Path(args.open_chromatin_tss).expanduser()
+        if args.open_chromatin_tss
+        else data_root / "raw" / "abc" / "glass_brain_v2.expressed_tss.hg19.tsv.gz"
+    )
+    open_chromatin_peaks_root = (
+        Path(args.open_chromatin_peaks_root).expanduser()
+        if args.open_chromatin_peaks_root
+        else data_root / "raw" / "brain-cell-type-peak-files"
+    )
     gwas_path = Path(args.gwas).expanduser() if args.gwas else data_root / "raw" / "ad_gwas" / "AD_sumstats_Jansenetal_2019sept.txt.gz"
     ld_dir = Path(args.ld_dir).expanduser() if args.ld_dir else data_root / "raw" / "ukbb_ld"
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else data_root / "results"
@@ -465,7 +503,7 @@ def main() -> None:
     else:
         device = args.device
 
-    key = _cache_key(args, gwas_path, abc_path)
+    key = _cache_key(args, gwas_path, abc_path, open_chromatin_tss_path, open_chromatin_peaks_root)
     paths = _cache_paths(cache_dir, key)
     ld_reference_dir = None
     if not args.rebuild_cache and not _dataset_cache_exists(paths):
@@ -487,13 +525,28 @@ def main() -> None:
                     cell_types=args.abc_cell_types,
                     add_intercept=not args.no_intercept,
                 )
+            elif args.annotation_source == "open_chromatin":
+                peak_files = {
+                    cell_type: open_chromatin_peaks_root / directory / filename
+                    for cell_type, (directory, filename) in OPEN_CHROMATIN_PEAK_FILES.items()
+                }
+                missing_peak_files = [str(path) for path in peak_files.values() if not path.is_file()]
+                if missing_peak_files:
+                    raise FileNotFoundError(f"Missing ATAC peak files: {missing_peak_files}")
+                ann = load_open_chromatin_tss_annotations(
+                    peak_files,
+                    open_chromatin_tss_path,
+                    gwas,
+                    tss_window=args.open_chromatin_tss_window,
+                    add_intercept=not args.no_intercept,
+                )
             else:
                 ann = load_top_assoc_annotations(
                     top_assoc_dir,
                     annotation_value=args.annotation_value,
                     add_intercept=not args.no_intercept,
                 )
-        if args.annotation_source == "abc":
+        if args.annotation_source in {"abc", "open_chromatin"}:
             with _timed(f"filter annotations to UKBB LD panel with {args.ld_jobs} jobs"):
                 ann_variants = filter_variants_to_ukbb_ld(
                     ann.variants,
@@ -531,7 +584,7 @@ def main() -> None:
                 n_mechanisms=len(ann.mechanisms),
             )
         reusable_ld = None
-        if args.annotation_source == "abc" and not args.rebuild_cache:
+        if args.annotation_source in {"abc", "open_chromatin"} and not args.rebuild_cache:
             with _timed("find compatible all-row LD cache"):
                 reusable_ld = _find_compatible_allrow_ld(
                     cache_dir,
@@ -704,6 +757,13 @@ def main() -> None:
         "abc_context_panel": args.abc_context_panel if args.annotation_source == "abc" else None,
         "abc_score_column": args.abc_score_column if args.annotation_source == "abc" else None,
         "abc_min_score": args.abc_min_score if args.annotation_source == "abc" else None,
+        "open_chromatin_tss": str(open_chromatin_tss_path) if args.annotation_source == "open_chromatin" else None,
+        "open_chromatin_peaks_root": (
+            str(open_chromatin_peaks_root) if args.annotation_source == "open_chromatin" else None
+        ),
+        "open_chromatin_tss_window": (
+            args.open_chromatin_tss_window if args.annotation_source == "open_chromatin" else None
+        ),
         "cv_folds": args.cv_folds if not args.no_cv else None,
         "cv_r2_threshold": args.cv_r2_threshold if not args.no_cv else None,
     }

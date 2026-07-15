@@ -271,3 +271,9 @@
 - Self-promoter records account for 86.4--86.9% of continuous ABC annotation mass because they receive ABC score one. BaselineLD already contains promoter annotations, so their conditional coefficient has limited opportunity to explain peak-associated AD signal.
 - The distal ABC links are cell-specific rather than highly collinear: pairwise distal support Jaccard indices are approximately 0.001 and score correlations are near zero. Poor cell-type specificity is therefore not the primary explanation.
 - Added S-LDSC sensitivity modes that respectively exclude self-promoters and binarize the ABC support. These isolate promoter dominance from score and multi-gene weighting; results remain pending.
+
+## 2026-07-15 ATAC-to-expressed-TSS COMPASS sensitivity
+
+- Added an all-row open-chromatin annotation source for COMPASS. It links each variant in the matched ATAC peak set to every expressed gene in the same cell type with a TSS within 100 kb.
+- The per-cell expressed-gene sets come from the Glass ABC model's `TargetGeneIsExpressed` field, and their GRCh38 TSS positions are lifted to hg19 before overlap with the ATAC peaks and GWAS/LD reference.
+- Contexts are LHX2 astrocyte, PU1 microglia, NeuN neuron, and Olig2 oligodendrocyte ATAC peaks. Variants outside peaks remain explicit all-zero model rows for correct LD accounting.
