@@ -240,3 +240,4 @@
 
 - Added an official LDSC input writer that exports the gene-summed ABC annotations, an all-SNP baseline annotation, the matching UKBB `R2` LD scores, regression-weight LD scores, annotation totals, and AD summary statistics in the formats consumed by `ldsc.py --h2`.
 - The official engine provides LDSC's native free intercept, iterative heteroskedastic weights, and block-jackknife uncertainty. This comparison is matched to the current UKBB panel and `r2 >= 0.01` representation; it is not a baseline-LD-adjusted analysis because compatible baseline-LD annotations have not yet been added.
+- The current UKBB metadata do not provide a compatible allele-frequency file for overlap-annotation enrichment output. The official fit therefore reports its native joint coefficients, intercept, and block-jackknife errors without requesting the optional overlap-enrichment table; no synthetic frequencies are introduced.

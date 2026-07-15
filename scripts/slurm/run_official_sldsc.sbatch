@@ -21,7 +21,5 @@ python "$HOME/knowles_lab/software/ldsc/ldsc.py" \
   --h2 "$input_dir/ad.sumstats.gz" \
   --ref-ld-chr "$input_dir/reference/abc_ukbb." \
   --w-ld-chr "$input_dir/weights/weights_ukbb." \
-  --overlap-annot \
-  --print-coefficients \
   --n-blocks 200 \
   --out "$output_dir/ad_abc_joint"
