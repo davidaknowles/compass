@@ -52,6 +52,9 @@ def _reconstruct_variants(data_root: Path, gwas_path: Path) -> pd.DataFrame:
     variants["pos"] = variants["pos"].astype(int)
     variants["MarkerID"] = variants["snp"].astype(str) if "snp" in variants else variants["variant_id"].astype(str)
     variants = variants.drop_duplicates("variant_id").sort_values(["chrom", "pos", "variant_id"]).reset_index(drop=True)
+    # load_abc_annotations retains MarkerID rather than the source GWAS SNP
+    # column. Match that shape so make_training_table can rename it safely.
+    variants = variants[["variant_id", "chrom", "pos", "MarkerID"]].copy()
     variants["variant_idx"] = np.arange(variants.shape[0], dtype=np.int64)
     ld_dir = data_root / "raw" / "ukbb_ld"
     ann_variants = filter_variants_to_ukbb_ld(variants, str(ld_dir), n_jobs=8, progress_every=50)
