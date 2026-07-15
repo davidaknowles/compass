@@ -347,7 +347,12 @@ def load_open_chromatin_tss_annotations(
         variants["MarkerID"] = variants["snp"].astype(str)
     else:
         variants["MarkerID"] = variants["variant_id"].astype(str)
-    variants = variants.drop_duplicates("variant_id").sort_values(["chrom", "pos", "variant_id"]).reset_index(drop=True)
+    variants = (
+        variants[["variant_id", "chrom", "pos", "MarkerID"]]
+        .drop_duplicates("variant_id")
+        .sort_values(["chrom", "pos", "variant_id"])
+        .reset_index(drop=True)
+    )
     variants["variant_idx"] = np.arange(variants.shape[0], dtype=np.int64)
 
     mechanisms = list(peak_files)
