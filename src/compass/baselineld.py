@@ -108,6 +108,71 @@ def write_abc_annotations(
     return counts
 
 
+def _read_peak_intervals(path: str | Path) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Read hg19 BED intervals as per-chromosome starts and running end maxima."""
+
+    peaks = pd.read_csv(path, sep="\t", header=None, usecols=[0, 1, 2], names=["chrom", "start", "end"])
+    peaks["chrom"] = pd.to_numeric(peaks["chrom"].astype(str).str.replace("chr", "", regex=False), errors="coerce")
+    peaks["start"] = pd.to_numeric(peaks["start"], errors="coerce")
+    peaks["end"] = pd.to_numeric(peaks["end"], errors="coerce")
+    peaks = peaks.dropna().astype({"chrom": np.int64, "start": np.int64, "end": np.int64})
+    peaks = peaks[peaks["chrom"].between(1, 22) & peaks["end"].gt(peaks["start"])]
+    if peaks.empty:
+        raise ValueError(f"No autosomal intervals found in {path}")
+    intervals: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for chrom, group in peaks.groupby("chrom", sort=False):
+        ordered = group.sort_values(["start", "end"], kind="mergesort")
+        starts = ordered["start"].to_numpy(np.int64)
+        # A running maximum supports overlapping and nested BED intervals.
+        max_ends = np.maximum.accumulate(ordered["end"].to_numpy(np.int64))
+        intervals[int(chrom)] = (starts, max_ends)
+    return intervals
+
+
+def _positions_in_intervals(
+    positions: np.ndarray,
+    intervals: tuple[np.ndarray, np.ndarray] | None,
+) -> np.ndarray:
+    """Return membership in 0-based half-open BED intervals for 1-based SNP positions."""
+
+    result = np.zeros(positions.size, dtype=np.float32)
+    if intervals is None or positions.size == 0:
+        return result
+    starts, max_ends = intervals
+    previous = np.searchsorted(starts, positions, side="right") - 1
+    valid = previous >= 0
+    # A 1-based genomic position is in BED [start, end) exactly when
+    # start < position <= end.
+    result[valid] = (positions[valid] <= max_ends[previous[valid]]).astype(np.float32)
+    return result
+
+
+def write_peak_annotations(
+    bim_by_chrom: dict[int, pd.DataFrame],
+    peak_files: dict[str, str | Path],
+    output_dir: str | Path,
+    prefix: str = "peaks_baselineld",
+) -> dict[str, int]:
+    """Write binary ATAC/ChIP-seq peak annotations in exact BIM row order."""
+
+    if not peak_files:
+        raise ValueError("peak_files must not be empty")
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    names = list(peak_files)
+    intervals = {name: _read_peak_intervals(path) for name, path in peak_files.items()}
+    counts: dict[str, int] = {}
+    for chrom, bim in sorted(bim_by_chrom.items()):
+        positions = bim["BP"].to_numpy(np.int64)
+        values = np.column_stack(
+            [_positions_in_intervals(positions, intervals[name].get(chrom)) for name in names]
+        )
+        frame = pd.concat((bim[["CHR", "SNP", "CM", "BP"]].reset_index(drop=True), pd.DataFrame(values, columns=names)), axis=1)
+        frame.to_csv(output_dir / f"{prefix}.{chrom}.annot.gz", sep="\t", index=False, compression="gzip")
+        counts[str(chrom)] = int(frame.shape[0])
+    return counts
+
+
 def write_hapmap3_sumstats(
     ad_sumstats_path: str | Path,
     output_path: str | Path,

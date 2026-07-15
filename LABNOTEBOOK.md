@@ -251,3 +251,8 @@
 - For LDSC's overlap-annotation accounting, the custom annotation files are linked alongside their corresponding custom LD-score files. This matches LDSC's prefix convention while keeping the reusable ABC annotation builder and its LD-score outputs separate.
 - The BaselineLD-adjusted official LDSC run completed on 1,185,548 matched regression SNPs. Observed-scale $h^2$ was `0.0152 (SE 0.0022)`, with intercept `1.0159 (SE 0.0143)`. None of the five conditional ABC coefficients was resolved: bipolar neuron was `3.56e-8 (SE 5.91e-8; z=0.60)`, CD14 monocyte was `-1.01e-8 (SE 1.19e-7; z=-0.08)`, and the three controls were also imprecise. The unadjusted UKBB-reference bipolar result is therefore not robust to conventional BaselineLD adjustment.
 - The legacy Python 2 LDSC source requires `bitarray`. Its prior extension contained AVX-512 instructions and failed in the genotype-reading `--l2` path on the available CPU nodes. `scripts/setup_portable_ldsc_py2.sh` rebuilds that dependency with a generic x86-64 target; the real chromosome-22 smoke calculation then completed in 23 seconds and wrote 15,633 regression-SNP LD scores.
+
+### Brain peak S-LDSC follow-up
+
+- Cloned `nottalexi/brain-cell-type-peak-files` at commit `c09bfe9` using SSH. Its hg19 peak calls cover NeuN neurons, PU1 microglia, Olig2 oligodendrocytes, and LHX2 astrocytes for ATAC-seq, H3K27ac, and H3K4me3.
+- Added a separate binary-peak BaselineLD workflow. It fits all 12 assay-by-cell-type annotations jointly, preserving the exact 1000G BIM row order and the existing HapMap3/BaselineLD overlap-annotation procedure. It intentionally replaces, rather than combines with, the ABC annotations.

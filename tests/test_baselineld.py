@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from compass.baselineld import ABC_COLUMN_NAMES, write_abc_annotations
+from compass.baselineld import ABC_COLUMN_NAMES, write_abc_annotations, write_peak_annotations
 
 
 class BaselineLdAnnotationTest(unittest.TestCase):
@@ -43,3 +43,22 @@ class BaselineLdAnnotationTest(unittest.TestCase):
         self.assertEqual(result.loc[0, columns].sum(), 0.0)
         self.assertAlmostEqual(result.loc[1, columns[0]], 0.02)
         self.assertAlmostEqual(result.loc[1, columns[-1]], 0.06)
+
+    def test_writes_binary_peak_membership_with_bed_coordinates(self):
+        bim = pd.DataFrame(
+            {
+                "CHR": [1, 1, 1, 1],
+                "SNP": ["rs1", "rs2", "rs3", "rs4"],
+                "CM": [0.0] * 4,
+                "BP": [100, 101, 150, 201],
+                "A1": ["A"] * 4,
+                "A2": ["G"] * 4,
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            peaks_path = tmp_path / "peaks.bed"
+            peaks_path.write_text("chr1\t99\t101\nchr1\t149\t201\n")
+            write_peak_annotations({1: bim}, {"ATAC_PU1": peaks_path}, tmp_path / "out")
+            result = pd.read_csv(tmp_path / "out" / "peaks_baselineld.1.annot.gz", sep="\t")
+        self.assertEqual(result["ATAC_PU1"].tolist(), [1.0, 1.0, 1.0, 1.0])
