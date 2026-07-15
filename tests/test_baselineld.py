@@ -136,3 +136,39 @@ class BaselineLdAnnotationTest(unittest.TestCase):
             )
             result = pd.read_csv(tmp_path / "out" / "glass_abc_baselineld.1.annot.gz", sep="\t")
         self.assertAlmostEqual(result.loc[0, "ABC_glass_microglia"], 0.02)
+
+    def test_writes_binary_abc_support(self):
+        bim = pd.DataFrame(
+            {
+                "CHR": [1],
+                "SNP": ["rs1"],
+                "CM": [0.0],
+                "BP": [100],
+                "A1": ["A"],
+                "A2": ["G"],
+            }
+        )
+        abc = pd.DataFrame(
+            {
+                "chr": ["chr1", "chr1"],
+                "start": [100, 100],
+                "end": [100, 100],
+                "TargetGene": ["GENE1", "GENE2"],
+                "ABC.Score": [0.02, 0.03],
+                "CellType": ["microglia", "microglia"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            abc_path = tmp_path / "abc.tsv.gz"
+            abc.to_csv(abc_path, sep="\t", index=False, compression="gzip")
+            write_continuous_abc_annotations(
+                {1: bim},
+                abc_path,
+                ["microglia"],
+                tmp_path / "out",
+                column_names=["ABC_glass_microglia"],
+                binary=True,
+            )
+            result = pd.read_csv(tmp_path / "out" / "abc_baselineld.1.annot.gz", sep="\t")
+        self.assertEqual(result.loc[0, "ABC_glass_microglia"], 1.0)

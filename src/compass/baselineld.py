@@ -72,6 +72,7 @@ def write_continuous_abc_annotations(
     min_score: float = 0.015,
     prefix: str = "abc_baselineld",
     exclude_self_promoter: bool = False,
+    binary: bool = False,
 ) -> dict[str, int]:
     """Write continuous gene-summed ABC annotations in exact BIM row order."""
 
@@ -109,6 +110,8 @@ def write_continuous_abc_annotations(
     )
     indices = [annotation.mechanisms.index(context) for context in contexts]
     scores = context_variant_scores(matrix, annotation.genes.shape[0], len(annotation.mechanisms), indices)
+    if binary:
+        scores = (scores > 0).astype(np.float32)
     score_frame = annotation.variants[["variant_id"]].copy()
     score_frame["chrom"] = score_frame["variant_id"].str.extract(r"^chr(\d+):", expand=False).astype(np.int64)
     score_frame["pos"] = score_frame["variant_id"].str.extract(r":(\d+)$", expand=False).astype(np.int64)
