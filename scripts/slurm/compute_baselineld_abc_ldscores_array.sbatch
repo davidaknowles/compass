@@ -30,5 +30,4 @@ python "$HOME/knowles_lab/software/ldsc/ldsc.py" \
   --annot "$input_dir/annotation/abc_baselineld.${chrom}.annot.gz" \
   --print-snps "$input_dir/regression_snps/${chrom}.snps" \
   --ld-wind-cm 1 \
-  --maf 0.05 \
   --out "$output_dir/abc_baselineld.${chrom}"
