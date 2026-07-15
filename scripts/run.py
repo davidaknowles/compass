@@ -72,7 +72,7 @@ def _timed(label: str):
     print(f"[setup] done {label}: {perf_counter() - start:.2f}s", flush=True)
 
 
-def _cache_key(args, gwas_path: Path) -> str:
+def _cache_key(args, gwas_path: Path, abc_path: Path) -> str:
     intercept = "intercept" if not args.no_intercept else "nointercept"
     n_samples = "gwas" if args.n_samples is None else f"n{args.n_samples:g}"
     if args.annotation_source == "abc":
@@ -80,9 +80,10 @@ def _cache_key(args, gwas_path: Path) -> str:
             cell_types = "all"
         else:
             cell_types = hashlib.sha1(args.abc_cell_types.encode("utf-8")).hexdigest()[:12]
+        annotation_path = hashlib.sha1(str(abc_path.resolve()).encode("utf-8")).hexdigest()[:12]
         source = (
             f"abc.allrows.{args.abc_score_column}.min{args.abc_min_score:g}."
-            f"r2ge{args.ld_r2_cutoff:g}.chromfp16.{cell_types}"
+            f"r2ge{args.ld_r2_cutoff:g}.chromfp16.{cell_types}.{annotation_path}"
         )
     else:
         source = f"topassoc.{args.annotation_value}"
@@ -464,7 +465,7 @@ def main() -> None:
     else:
         device = args.device
 
-    key = _cache_key(args, gwas_path)
+    key = _cache_key(args, gwas_path, abc_path)
     paths = _cache_paths(cache_dir, key)
     ld_reference_dir = None
     if not args.rebuild_cache and not _dataset_cache_exists(paths):
