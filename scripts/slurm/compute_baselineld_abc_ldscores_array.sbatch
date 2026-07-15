@@ -16,6 +16,8 @@ reference_root="$data_root/raw/ldsc_1000g"
 input_dir="$data_root/results/official_sldsc_baselineld_inputs"
 output_dir="$input_dir/ldscores"
 mkdir -p "$output_dir"
+ln -sfn "$input_dir/annotation/abc_baselineld.${chrom}.annot.gz" \
+  "$output_dir/abc_baselineld.${chrom}.annot.gz"
 
 bim=$(find "$reference_root" -name "1000G.EUR.QC.${chrom}.bim" -print -quit)
 [[ -n "$bim" ]]
