@@ -22,7 +22,7 @@ frq=$(find "$reference_root" -name '1000G.EUR.QC.1.frq' -print -quit)
 
 module purge
 module load Python/2.7.16-GCCcore-8.3.0
-export PYTHONPATH="$HOME/knowles_lab/software/ldsc_py2_deps:$HOME/knowles_lab/software/ldsc"
+export PYTHONPATH="$HOME/knowles_lab/software/ldsc_py2_deps_portable:$HOME/knowles_lab/software/ldsc"
 
 python "$HOME/knowles_lab/software/ldsc/ldsc.py" \
   --h2 "$input_dir/ad.sumstats.gz" \
