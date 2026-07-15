@@ -263,3 +263,11 @@
 - The Glass Lab v2 files provide four matched brain-cell predictions: astrocyte, microglia, neuron, and oligodendrocyte.
 - Their prediction coordinates are GRCh38, whereas the AD GWAS, UKBB LD, and 1000 Genomes BaselineLD reference used here are hg19. `src/compass/glass_abc.py` therefore lifts the BED intervals through the GRCh38-to-hg19 chain before either method consumes them.
 - `scripts/prepare_glass_abc_v2.py` emits a compact common ABC table containing only interval, target-gene, score, and cell-type fields. COMPASS and BaselineLD-adjusted S-LDSC use this identical table, eliminating an annotation-definition difference between the analyses.
+
+### Annotation diagnostic
+
+- The BaselineLD-adjusted continuous ABC analysis was null for all four Glass contexts: absolute coefficient z-scores were at most 1.59. The matched H3K27ac peak analysis had nominal PU1 microglial enrichment, so the discrepancy is not explained by reference panel, GWAS, or baseline-LD configuration.
+- ABC support covers 0.59--0.73% of 1000 Genomes reference SNPs, compared with 2.80--5.29% for matched H3K27ac peaks. ABC-positive SNPs are nevertheless strongly enriched in their matched H3K27ac peaks (13.5--25.9-fold), which supports the coordinate conversion and biological relevance of the linked elements.
+- Self-promoter records account for 86.4--86.9% of continuous ABC annotation mass because they receive ABC score one. BaselineLD already contains promoter annotations, so their conditional coefficient has limited opportunity to explain peak-associated AD signal.
+- The distal ABC links are cell-specific rather than highly collinear: pairwise distal support Jaccard indices are approximately 0.001 and score correlations are near zero. Poor cell-type specificity is therefore not the primary explanation.
+- Added S-LDSC sensitivity modes that respectively exclude self-promoters and binarize the ABC support. These isolate promoter dominance from score and multi-gene weighting; results remain pending.
