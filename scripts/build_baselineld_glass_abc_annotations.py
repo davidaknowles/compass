@@ -30,6 +30,7 @@ def main() -> None:
     parser.add_argument("--abc-path", default=None)
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--min-score", type=float, default=0.015)
+    parser.add_argument("--exclude-self-promoter", action="store_true")
     args = parser.parse_args()
 
     data_root = Path(args.data_root).expanduser()
@@ -63,6 +64,7 @@ def main() -> None:
         column_names=columns,
         min_score=args.min_score,
         prefix="glass_abc_baselineld",
+        exclude_self_promoter=args.exclude_self_promoter,
     )
     n_sumstats = write_hapmap3_sumstats(
         data_root / "raw" / "ad_gwas" / "AD_sumstats_Jansenetal_2019sept.txt.gz",
@@ -71,6 +73,7 @@ def main() -> None:
     manifest = {
         "contexts": list(GLASS_ABC_V2_CELLS),
         "annotation_columns": columns,
+        "exclude_self_promoter": args.exclude_self_promoter,
         "annotation_prefix": str(out_dir / "annotation" / "glass_abc_baselineld."),
         "bfile_prefixes": bfile_prefixes,
         "regression_snp_counts": regression_snp_counts,

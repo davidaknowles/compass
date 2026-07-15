@@ -161,6 +161,7 @@ def load_abc_annotations(
     score_column: str = "ABC.Score",
     min_score: float = 0.015,
     cell_types: str | Iterable[str] | None = None,
+    exclude_self_promoter: bool = False,
     add_intercept: bool = True,
     chunksize: int = 200_000,
 ) -> AnnotationData:
@@ -208,6 +209,8 @@ def load_abc_annotations(
         mechanisms.append("intercept")
     raw_records: list[tuple[str, int, int, float]] = []
     usecols = ["chr", "start", "end", "TargetGene", score_column, "CellType"]
+    if exclude_self_promoter:
+        usecols.append("isSelfPromoter")
 
     compression = "gzip" if abc_path.suffix == ".gz" else None
     reader = pd.read_csv(abc_path, sep="\t", usecols=usecols, compression=compression, chunksize=chunksize)
@@ -219,6 +222,8 @@ def load_abc_annotations(
         chunk["score"] = pd.to_numeric(chunk["score"], errors="coerce")
         chunk = chunk.dropna(subset=["chrom", "start", "end", "TargetGene", "score", "CellType"])
         chunk = chunk[chunk["chrom"].between(1, 22) & (chunk["score"] >= min_score)].copy()
+        if exclude_self_promoter:
+            chunk = chunk[~chunk["isSelfPromoter"].astype(str).str.lower().eq("true")].copy()
         if keep_cell_types is not None:
             chunk = chunk[chunk["CellType"].isin(keep_cell_types)].copy()
         if chunk.empty:

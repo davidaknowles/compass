@@ -71,6 +71,7 @@ def write_continuous_abc_annotations(
     column_names: list[str],
     min_score: float = 0.015,
     prefix: str = "abc_baselineld",
+    exclude_self_promoter: bool = False,
 ) -> dict[str, int]:
     """Write continuous gene-summed ABC annotations in exact BIM row order."""
 
@@ -94,6 +95,7 @@ def write_continuous_abc_annotations(
         gwas,
         min_score=min_score,
         cell_types=contexts,
+        exclude_self_promoter=exclude_self_promoter,
         add_intercept=False,
     )
     missing_contexts = set(contexts).difference(annotation.mechanisms)

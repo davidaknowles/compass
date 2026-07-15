@@ -14,7 +14,7 @@ import pandas as pd
 
 GLASS_ABC_V2_CELLS = ("astrocyte", "microglia", "neuron", "oligodendrocyte")
 _ABC_FILENAME = "EnhancerPredictionsAllPutative.ForVariantOverlap.shrunk150bp.tsv.gz"
-_REQUIRED_COLUMNS = ["chr", "start", "end", "TargetGene", "ABC.Score", "CellType"]
+_REQUIRED_COLUMNS = ["chr", "start", "end", "TargetGene", "ABC.Score", "CellType", "class", "isSelfPromoter"]
 
 
 def glass_abc_v2_paths(source_root: str | Path, cells: tuple[str, ...] = GLASS_ABC_V2_CELLS) -> dict[str, Path]:
@@ -87,7 +87,7 @@ def prepare_glass_abc_v2(
                 if mapped_bed.exists() and mapped_bed.stat().st_size:
                     frame = pd.read_csv(mapped_bed, sep="\t", header=None, names=header, usecols=_REQUIRED_COLUMNS)
                     frame["CellType"] = cell
-                    frame.to_csv(destination, sep="\t", index=False, header=False)
+                    frame[_REQUIRED_COLUMNS].to_csv(destination, sep="\t", index=False, header=False)
                     mapped_rows = int(frame.shape[0])
                 else:
                     mapped_rows = 0
