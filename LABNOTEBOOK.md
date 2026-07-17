@@ -1,5 +1,12 @@
 # LAB NOTEBOOK
 
+## 2026-07-17 AD GWAS correction
+
+- All AD analyses completed before this entry used the Jansen et al. 2019 summary statistics and must not be described as analyses of the 2026 consensus GWAS.
+- The corrected default is GWAS Catalog accession GCST90704647, a European Alzheimer disease and related dementias meta-analysis of 1,119,443 participants. Its metadata states that proxy samples were excluded.
+- The source is GWAS-SSF on GRCh38 and provides variant-specific `Neff_total`. `scripts/prepare_ad_2026_sumstats.py` maps coordinates to hg19 and exports `Neff_total` as `N` for COMPASS and S-LDSC.
+- New analyses use separate `ad2026` result names. The Jansen 2019 files and results are retained as historical outputs.
+
 ## 2026-07-17 SCZ 2026 EUR analysis setup
 
 ### GWAS input

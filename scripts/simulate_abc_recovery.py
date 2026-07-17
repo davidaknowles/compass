@@ -48,7 +48,7 @@ def _parse_csv(value: str, cast):
 
 
 def _dataset_paths(data_root: Path, cell_types: str):
-    gwas_path = data_root / "raw" / "ad_gwas" / "AD_sumstats_Jansenetal_2019sept.txt.gz"
+    gwas_path = data_root / "raw" / "ad_gwas_2026" / "GCST90704647.hg19.tsv.gz"
     args = SimpleNamespace(
         annotation_source="abc",
         no_intercept=False,

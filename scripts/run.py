@@ -489,7 +489,7 @@ def main() -> None:
         if args.open_chromatin_peaks_root
         else data_root / "raw" / "brain-cell-type-peak-files"
     )
-    gwas_path = Path(args.gwas).expanduser() if args.gwas else data_root / "raw" / "ad_gwas" / "AD_sumstats_Jansenetal_2019sept.txt.gz"
+    gwas_path = Path(args.gwas).expanduser() if args.gwas else data_root / "raw" / "ad_gwas_2026" / "GCST90704647.hg19.tsv.gz"
     ld_dir = Path(args.ld_dir).expanduser() if args.ld_dir else data_root / "raw" / "ukbb_ld"
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else data_root / "results"
     cache_dir = Path(args.cache_dir).expanduser() if args.cache_dir else data_root / "cache"

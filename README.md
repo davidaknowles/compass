@@ -30,14 +30,15 @@ Current downloaded files:
 ```text
 ~/knowles_lab/data/compass/raw/zenodo_top_assoc/*.tsv.gz
 ~/knowles_lab/data/compass/raw/abc/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz
-~/knowles_lab/data/compass/raw/ad_gwas/AD_sumstats_Jansenetal_2019sept.txt.gz
+~/knowles_lab/data/compass/raw/ad_gwas_2026/GCST90704647.hg19.tsv.gz
 ~/knowles_lab/data/compass/raw/ukbb_ld/
 ~/knowles_lab/data/compass/results/
 ```
 
-The AD GWAS file is the updated Jansen et al. 2019 Alzheimer summary statistics
-downloaded from the CNCR/SURF data share. The eQTL top-association files are from
-Zenodo record `15860973`. The default annotation source is now public ABC
+The AD GWAS is the 2026 European consensus meta-analysis GCST90704647, with
+proxy samples excluded. The downloaded GRCh38 GWAS-SSF file is normalized to
+hg19 by `scripts/prepare_ad_2026_sumstats.py`. The eQTL top-association files
+are from Zenodo record `15860973`. The default annotation source is public ABC
 enhancer-gene scores from Nasser et al. 2021.
 
 Glass Lab v2 brain-cell ABC predictions can be prepared for the hg19 GWAS and
@@ -52,7 +53,7 @@ The downloader uses these public sources:
 
 - SingleBrain top-association eQTL files: Zenodo record `15860973`, `https://zenodo.org/records/15860973`
 - ABC enhancer-gene predictions in 131 biosamples: Engreitz Lab/Nasser et al. 2021, `https://mitra.stanford.edu/engreitz/oak/public/Nasser2021/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz`
-- Alzheimer GWAS summary statistics: CNCR/SURF share, `https://vu.data.surf.nl/index.php/s/l7aiRr1UEgdoJfZ/download?path=%2F&files=AD_sumstats_Jansenetal_2019sept.txt.gz`
+- Alzheimer GWAS summary statistics: GWAS Catalog GCST90704647, `https://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST90704001-GCST90705000/GCST90704647/`
 - UK Biobank LD matrices used by PolyFun: Broad/Alkes S3 prefix, `https://broad-alkesgroup-ukbb-ld.s3.amazonaws.com/UKBB_LD/`
 
 ## Download Commands
@@ -67,6 +68,14 @@ python scripts/download_required_data.py \
   --download-ad \
   --download-ld-metadata \
   --download-ld-npz
+```
+
+Normalize the downloaded GRCh38 AD statistics to the hg19 build used by the LD
+references:
+
+```bash
+module load Kent_tools/461-GCC-12.2.0
+python scripts/prepare_ad_2026_sumstats.py
 ```
 
 Submit the same full download through Slurm:
@@ -102,9 +111,8 @@ gastrocnemius muscle, and uterus) with:
 python scripts/run.py --abc-context-panel ad_with_controls
 ```
 
-The run requires known sample sizes. The AD GWAS downloaded above contains
-`Nsum`/`Neff`, which are loaded automatically; otherwise pass a scalar sample
-size explicitly:
+The run requires known sample sizes. The normalized AD GWAS contains
+per-variant `Neff_total`, loaded as `N`; otherwise pass a scalar sample size explicitly:
 
 ```bash
 python scripts/run.py --gwas path/to/sumstats.tsv.gz --n-samples 360000

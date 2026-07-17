@@ -39,7 +39,7 @@ def main() -> None:
 
     data_root = Path(args.data_root).expanduser()
     reference_root = Path(args.reference_root).expanduser() if args.reference_root else data_root / "raw" / "ldsc_1000g"
-    gwas_path = Path(args.gwas).expanduser() if args.gwas else data_root / "raw" / "ad_gwas" / "AD_sumstats_Jansenetal_2019sept.txt.gz"
+    gwas_path = Path(args.gwas).expanduser() if args.gwas else data_root / "raw" / "ad_gwas_2026" / "GCST90704647.hg19.tsv.gz"
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else data_root / "results" / "official_sldsc_baselineld_inputs"
     bims: dict[int, pd.DataFrame] = {}
     bfile_prefixes: dict[str, str] = {}

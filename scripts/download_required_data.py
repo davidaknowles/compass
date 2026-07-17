@@ -12,8 +12,8 @@ import xml.etree.ElementTree as ET
 
 
 AD_GWAS_URL = (
-    "https://vu.data.surf.nl/index.php/s/l7aiRr1UEgdoJfZ/download"
-    "?path=%2F&files=AD_sumstats_Jansenetal_2019sept.txt.gz"
+    "https://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/"
+    "GCST90704001-GCST90705000/GCST90704647/GCST90704647.tsv.gz"
 )
 
 ZENODO_RECORD = "15860973"
@@ -163,7 +163,7 @@ def main() -> None:
 
     data_root = Path(args.data_root).expanduser()
     top_assoc_dir = Path(args.top_assoc_dir).expanduser() if args.top_assoc_dir else data_root / "raw" / "zenodo_top_assoc"
-    ad_out = Path(args.ad_out).expanduser() if args.ad_out else data_root / "raw" / "ad_gwas" / "AD_sumstats_Jansenetal_2019sept.txt.gz"
+    ad_out = Path(args.ad_out).expanduser() if args.ad_out else data_root / "raw" / "ad_gwas_2026" / "GCST90704647.tsv.gz"
     ld_dir = Path(args.ld_dir).expanduser() if args.ld_dir else data_root / "raw" / "ukbb_ld"
     abc_out = Path(args.abc_out).expanduser() if args.abc_out else data_root / "raw" / "abc" / ABC_PREDICTIONS_NAME
 
