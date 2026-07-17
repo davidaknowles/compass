@@ -1,5 +1,19 @@
 # LAB NOTEBOOK
 
+## 2026-07-17 SCZ 2026 EUR analysis setup
+
+### GWAS input
+
+- Downloaded the EUR-only schizophrenia meta-analysis BCF from the Bigdeli et al. 2026 Synapse release (`syn66321648`, `SCZ_EUR_autosomes.bcf`).
+- The source BCF is GRCh38. `scripts/prepare_scz_2026_sumstats.py` lifts single-variant coordinates to hg19 with the hg38-to-hg19 chain, retains rsID, effect allele, beta, SE, and effective N, and writes `raw/scz_gwas_2026/SCZ_EUR_2026.hg19.tsv.gz`.
+- The source has 12,991,921 autosomal records; 12,931,677 lifted to hg19. Effective sample size is retained per variant rather than replaced by a study-wide constant.
+
+### Analysis plan
+
+- `scripts/slurm/setup_scz2026_compass.sbatch` creates the all-variant UKBB-LD cache once. `scripts/slurm/run_scz2026_compass_b6k.sbatch` runs COMPASS with Glass ABC, expressed-gene open-chromatin-to-TSS links, public ABC, and the public-ABC control panel.
+- `scripts/slurm/run_scz2026_sldsc.sbatch` builds, computes LD scores, and runs official BaselineLD-adjusted S-LDSC for continuous, binary, and distal Glass ABC, brain ATAC/histone peaks, and the public ABC panel.
+- BaselineLD builders now accept `--gwas` and normalize arbitrary supported GWAS schemas through `load_gwas_sumstats`; all LDSC inputs require known per-variant sample sizes.
+
 ## 2026-07-05 genome-wide AD COMPASS run
 
 ### Model components

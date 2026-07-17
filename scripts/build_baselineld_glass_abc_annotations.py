@@ -28,6 +28,7 @@ def main() -> None:
     parser.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
     parser.add_argument("--reference-root", default=None)
     parser.add_argument("--abc-path", default=None)
+    parser.add_argument("--gwas", default=None)
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--min-score", type=float, default=0.015)
     parser.add_argument("--exclude-self-promoter", action="store_true")
@@ -37,6 +38,7 @@ def main() -> None:
     data_root = Path(args.data_root).expanduser()
     reference_root = Path(args.reference_root).expanduser() if args.reference_root else data_root / "raw" / "ldsc_1000g"
     abc_path = Path(args.abc_path).expanduser() if args.abc_path else data_root / "raw" / "abc" / "glass_brain_v2.hg19.tsv.gz"
+    gwas_path = Path(args.gwas).expanduser() if args.gwas else data_root / "raw" / "ad_gwas" / "AD_sumstats_Jansenetal_2019sept.txt.gz"
     out_dir = (
         Path(args.out_dir).expanduser()
         if args.out_dir
@@ -69,8 +71,8 @@ def main() -> None:
         binary=args.binary,
     )
     n_sumstats = write_hapmap3_sumstats(
-        data_root / "raw" / "ad_gwas" / "AD_sumstats_Jansenetal_2019sept.txt.gz",
-        out_dir / "ad.sumstats.gz",
+        gwas_path,
+        out_dir / "sumstats.gz",
     )
     manifest = {
         "contexts": list(GLASS_ABC_V2_CELLS),
@@ -81,7 +83,8 @@ def main() -> None:
         "bfile_prefixes": bfile_prefixes,
         "regression_snp_counts": regression_snp_counts,
         "annotation_row_counts": annotation_counts,
-        "sumstats": str(out_dir / "ad.sumstats.gz"),
+        "sumstats": str(out_dir / "sumstats.gz"),
+        "gwas": str(gwas_path),
         "n_sumstats": n_sumstats,
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

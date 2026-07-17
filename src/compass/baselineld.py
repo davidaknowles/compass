@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .data import load_abc_annotations
+from .data import load_abc_annotations, load_gwas_sumstats
 from .ld import annotation_triples_to_csr
 from .simulation import context_variant_scores
 
@@ -204,27 +204,19 @@ def write_peak_annotations(
     return counts
 
 
-def write_hapmap3_sumstats(
-    ad_sumstats_path: str | Path,
-    output_path: str | Path,
-) -> int:
-    """Export native AD Z statistics and known effective sample sizes for LDSC."""
+def write_hapmap3_sumstats(sumstats_path: str | Path, output_path: str | Path) -> int:
+    """Export autosomal Z statistics and known sample sizes for LDSC."""
 
-    source = pd.read_csv(
-        ad_sumstats_path,
-        sep="\t",
-        compression="gzip",
-        usecols=["CHR", "SNP", "Z", "Neff"],
-    )
-    source["CHR"] = pd.to_numeric(source["CHR"], errors="coerce")
-    source["Z"] = pd.to_numeric(source["Z"], errors="coerce")
-    source["N"] = pd.to_numeric(source["Neff"], errors="coerce")
+    source = load_gwas_sumstats(sumstats_path)
+    if "snp" not in source or "n" not in source:
+        raise ValueError("LDSC sumstats require SNP IDs and known per-variant sample sizes")
+    autosomal = source["chrom"].between(1, 22) if "chrom" in source else pd.Series(True, index=source.index)
     result = source.loc[
-        source["CHR"].between(1, 22) & source["SNP"].notna() & source["Z"].notna() & source["N"].gt(0),
-        ["SNP", "N", "Z"],
-    ].drop_duplicates("SNP")
+        autosomal & source["snp"].notna() & source["z"].notna() & source["n"].gt(0),
+        ["snp", "n", "z"],
+    ].rename(columns={"snp": "SNP", "n": "N", "z": "Z"}).drop_duplicates("SNP")
     if result.empty:
-        raise ValueError("No valid autosomal AD summary statistics with known Neff")
+        raise ValueError("No valid autosomal summary statistics with known sample sizes")
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_path, sep="\t", index=False, compression="gzip")

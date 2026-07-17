@@ -5,6 +5,10 @@ set -euo pipefail
 input_dir=${1:?usage: run_official_sldsc_baselineld_annotations.sh INPUT_DIR PREFIX OUTPUT_DIR}
 prefix=${2:?usage: run_official_sldsc_baselineld_annotations.sh INPUT_DIR PREFIX OUTPUT_DIR}
 output_dir=${3:?usage: run_official_sldsc_baselineld_annotations.sh INPUT_DIR PREFIX OUTPUT_DIR}
+sumstats=${4:-"$input_dir/sumstats.gz"}
+if [[ ! -f "$sumstats" && -f "$input_dir/ad.sumstats.gz" ]]; then
+  sumstats="$input_dir/ad.sumstats.gz"
+fi
 data_root=/gpfs/commons/home/daknowles/knowles_lab/data/compass
 reference_root="$data_root/raw/ldsc_1000g"
 mkdir -p "$output_dir"
@@ -19,7 +23,7 @@ module load Python/2.7.16-GCCcore-8.3.0
 export PYTHONPATH="$HOME/knowles_lab/software/ldsc_py2_deps_portable:$HOME/knowles_lab/software/ldsc"
 
 python "$HOME/knowles_lab/software/ldsc/ldsc.py" \
-  --h2 "$input_dir/ad.sumstats.gz" \
+  --h2 "$sumstats" \
   --ref-ld-chr "$input_dir/ldscores/${prefix}.,${baseline%1.l2.ldscore.gz}" \
   --w-ld-chr "${weights%1.l2.ldscore.gz}" \
   --frqfile-chr "${frq%1.frq}" \

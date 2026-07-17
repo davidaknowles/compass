@@ -427,7 +427,13 @@ def load_gwas_sumstats(path: str | Path) -> pd.DataFrame:
 
     path = Path(path).expanduser()
     compression = "gzip" if path.suffix == ".gz" else None
-    df = pd.read_csv(path, sep=None, engine="python", compression=compression)
+    suffixes = path.suffixes
+    if ".tsv" in suffixes or ".txt" in suffixes:
+        df = pd.read_csv(path, sep="\t", compression=compression)
+    elif ".csv" in suffixes:
+        df = pd.read_csv(path, sep=",", compression=compression)
+    else:
+        df = pd.read_csv(path, sep=None, engine="python", compression=compression)
     lower = {c.lower(): c for c in df.columns}
 
     def pick(*names: str) -> str | None:
