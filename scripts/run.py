@@ -257,6 +257,34 @@ def _ld_blocks_match_chromosome_rows(ld_blocks: list[LdChromosomeBlock], chrom: 
     return True
 
 
+def _load_ld_chromosome_rows(r2_dir: Path) -> list[tuple[int, np.ndarray]]:
+    """Load only chromosome row indices, without materializing LD matrices."""
+
+    with open(_ld_manifest_path(r2_dir), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    reference_dir = manifest.get("reference_dir")
+    if reference_dir is not None:
+        reference = Path(reference_dir).expanduser()
+        if not reference.is_absolute():
+            reference = (r2_dir / reference).resolve()
+        if reference.resolve() == r2_dir.resolve():
+            raise ValueError(f"LD cache {r2_dir} references itself")
+        return _load_ld_chromosome_rows(reference)
+    return [
+        (int(item["chrom"]), np.load(r2_dir / item["rows"], allow_pickle=False))
+        for item in manifest["blocks"]
+    ]
+
+
+def _ld_chromosome_rows_match(rows_by_chrom: list[tuple[int, np.ndarray]], chrom: np.ndarray) -> bool:
+    if sum(rows.size for _, rows in rows_by_chrom) != chrom.size:
+        return False
+    for chromosome, rows in rows_by_chrom:
+        if not np.array_equal(np.asarray(rows, dtype=np.int64), np.flatnonzero(chrom == chromosome)):
+            return False
+    return True
+
+
 def _ld_diagnostics_for_dir(r2_dir: Path) -> pd.DataFrame:
     name = r2_dir.name
     for suffix in (".gwas.R2.chroms", ".R2.chroms"):
@@ -278,10 +306,11 @@ def _find_compatible_allrow_ld(
     candidates = sorted(cache_dir.glob(pattern), key=lambda path: path.stat().st_mtime, reverse=True)
     for candidate in candidates:
         try:
-            blocks = _load_ld_blocks_from_dir(candidate)
+            rows_by_chrom = _load_ld_chromosome_rows(candidate)
         except (FileNotFoundError, KeyError, OSError, ValueError):
             continue
-        if _ld_blocks_match_chromosome_rows(blocks, chrom):
+        if _ld_chromosome_rows_match(rows_by_chrom, chrom):
+            blocks = _load_ld_blocks_from_dir(candidate)
             return blocks, _ld_diagnostics_for_dir(candidate), candidate.resolve()
     return None
 

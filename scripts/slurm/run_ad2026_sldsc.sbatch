@@ -9,8 +9,12 @@
 
 set -euo pipefail
 
-target=${1:?usage: run_ad2026_sldsc.sbatch {glass|glass_binary|glass_distal|peaks|public_abc} {build|ldscores|fit}}
-stage=${2:?usage: run_ad2026_sldsc.sbatch TARGET {build|ldscores|fit}}
+if [[ $# -lt 2 ]]; then
+  echo "usage: run_ad2026_sldsc.sbatch TARGET STAGE" >&2
+  exit 2
+fi
+target=$1
+stage=$2
 data_root=/gpfs/commons/home/daknowles/knowles_lab/data/compass
 gwas="$data_root/raw/ad_gwas_2026/GCST90704647.hg19.tsv.gz"
 

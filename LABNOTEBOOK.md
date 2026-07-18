@@ -7,6 +7,13 @@
 - The source is GWAS-SSF on GRCh38 and provides variant-specific `Neff_total`. `scripts/prepare_ad_2026_sumstats.py` maps coordinates to hg19 and exports `Neff_total` as `N` for COMPASS and S-LDSC.
 - New analyses use separate `ad2026` result names. The Jansen 2019 files and results are retained as historical outputs.
 
+### Initial submission correction
+
+- The first AD 2026 and SCZ 2026 COMPASS setup jobs exceeded 128 GB while `_find_compatible_allrow_ld` loaded complete LD matrices for each candidate before checking row compatibility.
+- Compatibility checks now load only chromosome row-index arrays, then materialize one matching LD archive. Setup requests 192 GB to accommodate the normalized GWAS, annotation tables, and selected LD archive concurrently.
+- The first S-LDSC build jobs failed because braces inside a Bash `${parameter:?message}` usage string terminated parameter expansion early. Argument validation now uses an explicit argument-count check.
+- All jobs depending on those failed submissions are obsolete and were replaced with corrected dependency chains.
+
 ## 2026-07-17 SCZ 2026 EUR analysis setup
 
 ### GWAS input

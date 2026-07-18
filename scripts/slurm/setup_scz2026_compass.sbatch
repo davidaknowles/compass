@@ -5,7 +5,7 @@
 #SBATCH --error=/gpfs/commons/home/daknowles/knowles_lab/data/compass/logs/scz2026-setup-%j.err
 #SBATCH --time=16:00:00
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=128G
+#SBATCH --mem=192G
 
 set -euo pipefail
 
