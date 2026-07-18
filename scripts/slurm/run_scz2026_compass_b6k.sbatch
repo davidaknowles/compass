@@ -10,7 +10,11 @@
 
 set -euo pipefail
 
-target=${1:?usage: run_scz2026_compass_b6k.sbatch {glass|open_chromatin|public_abc|public_abc_controls}}
+if [[ $# -lt 1 ]]; then
+  echo "usage: run_scz2026_compass_b6k.sbatch TARGET" >&2
+  exit 2
+fi
+target=$1
 data_root=/gpfs/commons/home/daknowles/knowles_lab/data/compass
 gwas="$data_root/raw/scz_gwas_2026/SCZ_EUR_2026.hg19.tsv.gz"
 

@@ -12,6 +12,7 @@
 - The first AD 2026 and SCZ 2026 COMPASS setup jobs exceeded 128 GB while `_find_compatible_allrow_ld` loaded complete LD matrices for each candidate before checking row compatibility.
 - Compatibility checks now load only chromosome row-index arrays, then materialize one matching LD archive. Setup requests 192 GB to accommodate the normalized GWAS, annotation tables, and selected LD archive concurrently.
 - The first S-LDSC build jobs failed because braces inside a Bash `${parameter:?message}` usage string terminated parameter expansion early. Argument validation now uses an explicit argument-count check.
+- The first dependent COMPASS GPU fits exposed the same brace-parsing defect in their target argument. Their target validation now uses the same explicit argument-count check.
 - All jobs depending on those failed submissions are obsolete and were replaced with corrected dependency chains.
 
 ## 2026-07-17 SCZ 2026 EUR analysis setup
