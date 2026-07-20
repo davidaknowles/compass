@@ -13,6 +13,7 @@
 - The initial full jobs revealed that scaled context effects were reinitialized to the unscaled profile at every lambda instead of retaining the preceding lambda's fitted scale. This added a stale-scale gradient update without changing the converged model. Corrected the warm start and added diagnostics and regression coverage.
 - Hierarchical CV now writes an atomic checkpoint after every completed fold/lambda pair. It stores fold-specific `B`, context effects, residual coefficients, scores, and next-lambda indices, validates the fold/grid/profile/model contract on load, and resumes incomplete folds. This protects the full grid from scheduler time limits without reducing optimization iterations or omitting weak penalties.
 - The production Slurm entry point is idempotent: it exits when both final metadata and coefficient archives exist, and otherwise resumes the automatic CV checkpoint. Dependent continuation jobs can therefore be queued with `afterany`; successful primary runs make them no-ops, while timed-out runs continue from the last completed fold/lambda pair.
+- Replaced the pre-checkpoint full jobs with checkpoint-enabled primaries `19285062` (AD) and `19285063` (SCZ). Queued two `afterany` continuations per trait: `19285097` and `19285098` for AD, and `19285099` and `19285100` for SCZ. The first AD checkpoint reproduces the calibrated ordering in fold 0: microglia `4.61e-7`, oligodendrocyte `4.57e-8`, neuron `2.06e-8`, and astrocyte zero.
 
 ## 2026-07-17 AD GWAS correction
 
