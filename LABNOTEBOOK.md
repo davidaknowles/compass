@@ -12,6 +12,7 @@
 - Submitted full ten-fold hierarchical fits as jobs `19283870` (AD) and `19283871` (SCZ). These fit nuclear-regularized gene deviations conditional on the scaled H3K27ac S-LDSC profile. The completion audit must compare the selected CV score with the high-penalty/no-deviation limit and inspect deviation mass before claiming added COMPASS resolution.
 - The initial full jobs revealed that scaled context effects were reinitialized to the unscaled profile at every lambda instead of retaining the preceding lambda's fitted scale. This added a stale-scale gradient update without changing the converged model. Corrected the warm start and added diagnostics and regression coverage.
 - Hierarchical CV now writes an atomic checkpoint after every completed fold/lambda pair. It stores fold-specific `B`, context effects, residual coefficients, scores, and next-lambda indices, validates the fold/grid/profile/model contract on load, and resumes incomplete folds. This protects the full grid from scheduler time limits without reducing optimization iterations or omitting weak penalties.
+- The production Slurm entry point is idempotent: it exits when both final metadata and coefficient archives exist, and otherwise resumes the automatic CV checkpoint. Dependent continuation jobs can therefore be queued with `afterany`; successful primary runs make them no-ops, while timed-out runs continue from the last completed fold/lambda pair.
 
 ## 2026-07-17 AD GWAS correction
 

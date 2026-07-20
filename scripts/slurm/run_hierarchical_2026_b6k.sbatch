@@ -33,6 +33,12 @@ case "$trait" in
     ;;
 esac
 
+run_name="compass-${trait}2026-h3k27ac-flat-hierarchical-ldcv10-fp32"
+if [[ -s "$data_root/results/${run_name}.metadata.json" && -s "$data_root/results/${run_name}.npz" ]]; then
+  echo "[setup] completed outputs already exist for $run_name"
+  exit 0
+fi
+
 cd /gpfs/commons/home/daknowles/projects/compass
 source /gpfs/commons/home/daknowles/venv/torchfix/bin/activate
 export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
@@ -54,4 +60,4 @@ python scripts/run.py \
   --max-lambda-extensions 4 \
   --lambda-extension-factor 3 \
   --ld-jobs 8 \
-  --run-name "compass-${trait}2026-h3k27ac-flat-hierarchical-ldcv10-fp32"
+  --run-name "$run_name"
