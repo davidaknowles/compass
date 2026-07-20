@@ -101,6 +101,26 @@ We then have,
 \end{equation}
 where now $B_{kl} = \alpha_{kl}^2 w_l$ is the gene-by-cell-type mediated heritability matrix. The same convex nuclear norm relaxation applies, and the SVD of $B$ now identifies cell-type-specific regulatory modules.
 
+\subsection{Hierarchical context and gene-deviation model}
+
+Applying the nuclear-norm penalty directly to the complete matrix $B$ also penalizes a context-wide effect shared by all genes. This differs from the infinitesimal S-LDSC reduction, in which every gene contributing to annotation $l$ shares one unpenalized coefficient. To separate these two levels, we write
+\begin{equation}
+    B_{kl} = s\,q_l + D_{kl}, \qquad s\ge 0,\quad q_l\ge 0,\quad D_{kl}\ge 0,
+    \label{eq:hierarchical-B}
+\end{equation}
+where $q$ is a context profile, $s$ is its fitted genome-wide scale, and $D$ contains gene-specific departures from that profile. The resulting objective is
+\begin{equation}
+    \min_{s,\,D,\,\tau_\gamma\ge0}
+    \sum_j \eta_j\left[
+      \chi_j^2-1-N\sum_{k,l}(s q_l+D_{kl})\mathcal{T}_{jkl}
+      -N\tau_\gamma l_j
+    \right]^2 + \lambda\lVert D\rVert_*.
+    \label{eq:hierarchical-objective}
+\end{equation}
+Thus, large $\lambda$ suppresses only gene-specific deviations and leaves the context-wide component estimable. When $q$ is unconstrained, the model estimates one non-negative coefficient per context. For the BaselineLD-calibrated analysis, $q$ is the vector of official S-LDSC coefficients after setting negative entries to zero; COMPASS estimates $s$ rather than transferring the reference-specific coefficient magnitude. Chromosome jackknife estimates are used for uncertainty in $s q_l$, with the S-LDSC profile uncertainty propagated approximately.
+
+The calibrated analysis is deliberately a two-stage conditional model. Because $q$ is estimated from the same GWAS, its cell-type ordering is not an independent COMPASS discovery, and cross-validation selects only the penalty on $D$ conditional on $q$. The analysis asks whether gene-specific departures improve held-out prediction while retaining a BaselineLD-adjusted context contrast; it is not an unbiased end-to-end validation of that contrast.
+
 \subsection{The Necessity of Non-Negativity}
 While standard summary statistic methods occasionally tolerate negative enrichment parameters, enforcing $B_{kl} \ge 0$ is mandatory in this gene-centric framework. Without non-negativity constraints, the optimization landscape suffers from two failures:
 
@@ -248,6 +268,14 @@ We also ran the official LDSC implementation on the AD statistics, using the sam
 
 We therefore repeated the analysis with the conventional 1000 Genomes European reference, BaselineLD v2.2, HapMap3 regression weights, matching allele frequencies, and overlap-annotation accounting. Using 1,185,548 matched regression SNPs, the observed-scale estimate was $h^2=0.0152\;(\mathrm{SE}=0.0022)$ with intercept $1.0159\;(\mathrm{SE}=0.0143)$. No ABC context had a resolved conditional coefficient. The bipolar-neuron coefficient was $3.56\times10^{-8}$ (SE $5.91\times10^{-8}$; $z=0.60$), and the CD14-monocyte coefficient was $-1.01\times10^{-8}$ (SE $1.19\times10^{-7}$; $z=-0.08$); the three peripheral controls were likewise imprecise. Thus the apparent bipolar-neuron signal in the UK Biobank-reference comparison is not robust to standard BaselineLD adjustment. This adjusted result is the appropriate S-LDSC comparison; the earlier matched-reference run remains useful only as a diagnostic of the analysis-specific LD representation.
 
-As an ABC-independent regulatory comparison, we jointly fit binary ATAC-seq, H3K27ac, and H3K4me3 peak annotations from human NeuN neuron, PU1 microglia, Olig2 oligodendrocyte, and LHX2 astrocyte nuclei, again conditional on BaselineLD. The total observed-scale estimate was $h^2=0.0151\;(\mathrm{SE}=0.0022)$ with intercept $1.0160\;(\mathrm{SE}=0.0146)$. PU1 microglial H3K27ac peaks covered 2.72\% of SNPs, accounted for 40.0\% of the fitted $h^2$ (SE 10.4\%), and had 14.7-fold enrichment (SE 3.82; enrichment $p=1.36\times10^{-4}$). Its conditional coefficient was positive ($3.26\times10^{-8}$; SE $1.47\times10^{-8}$; $z=2.22$; nominal $p=0.026$). The other 11 peak annotations were not resolved. The coefficient does not survive Benjamini--Hochberg correction across the 12 custom peak annotations ($q\approx0.31$), so this is a coherent microglial-H3K27ac signal for follow-up rather than a corrected discovery.
+As an ABC-independent regulatory comparison, we jointly fit binary ATAC-seq, H3K27ac, and H3K4me3 peak annotations from human NeuN neuron, PU1 microglia, Olig2 oligodendrocyte, and LHX2 astrocyte nuclei, again conditional on BaselineLD. PU1 microglial H3K27ac peaks covered 2.72\% of SNPs, accounted for 35.4\% of fitted $h^2$ (SE 5.90\%), and had 13.0-fold enrichment (SE 2.17; enrichment $p=2.15\times10^{-7}$). Its conditional coefficient was positive ($1.58\times10^{-7}$; SE $5.30\times10^{-8}$; $z=2.97$). The binary Glass ABC analysis gave a concordant result: the microglial annotation had 27.1-fold enrichment and a positive conditional coefficient ($z=3.22$), whereas continuous Glass ABC was unresolved ($z=1.14$). The agreement between binary ABC support and independent PU1 H3K27ac peaks supports microglial enrichment in AD, but does not establish gene-level mediation.
+
+An uncalibrated hierarchical COMPASS pilot did not recover this specificity. Its microglial H3K27ac coefficient was $1.60\times10^{-7}$ ($z=1.16$), while neuronal and oligodendrocyte coefficients were larger and had similar uncertainty. After fixing the context direction to the non-negative BaselineLD S-LDSC profile and re-estimating only its scale, the pilot assigned the largest effect to microglia ($4.45\times10^{-7}$; chromosome-jackknife $z=2.03$). This calibrated result matches the desired cell-type ordering by construction and should be interpreted as a compatibility check, not independent replication. The full LD-component cross-validated fit of the gene-deviation matrix is in progress.
+
+\section{Application to Schizophrenia GWAS}
+
+The schizophrenia analysis used European-ancestry 2026 summary statistics and the same brain peak panel. BaselineLD-adjusted S-LDSC produced strong and coherent neuronal enrichment. NeuN H3K27ac peaks had 5.71-fold enrichment ($p=2.14\times10^{-23}$) and a positive conditional coefficient ($3.08\times10^{-7}$; SE $4.23\times10^{-8}$; $z=7.28$). NeuN H3K4me3 peaks had 10.2-fold enrichment and a positive coefficient ($z=4.63$). Binary Glass neuronal ABC support was also enriched 10.6-fold, with a positive coefficient ($z=3.74$); continuous and distal Glass ABC annotations were less well resolved.
+
+Unlike AD, the uncalibrated hierarchical COMPASS H3K27ac pilot independently ranked neurons first. The neuronal coefficient was $3.65\times10^{-7}$ ($z=2.46$), corresponding to an implied annotated $h^2$ of 0.216. Astrocytes were also positive ($z=2.34$), so the result has the expected direction but weaker specificity than S-LDSC. A gene-linked peak-to-expressed-TSS pilot gave the same ordering. Full conditional cross-validation is in progress to test whether gene-specific deviations improve prediction beyond the shared neuronal context effect.
 
 \end{document}
