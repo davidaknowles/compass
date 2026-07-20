@@ -778,7 +778,7 @@ def fit_hierarchical_nuclear(
         B = torch.zeros((n_genes, n_mechanisms), dtype=train_dtype, device=device, requires_grad=True)
     else:
         B = torch.as_tensor(init_B, dtype=train_dtype, device=device).clone().requires_grad_(True)
-    if fixed_context_effects is not None:
+    if fixed_context_effects is not None and not scale_fixed_context_effects:
         fixed_context_effects = np.asarray(fixed_context_effects, dtype=np.float32)
         if fixed_context_effects.shape != (n_mechanisms,) or np.any(fixed_context_effects < 0):
             raise ValueError("fixed_context_effects must be a non-negative vector with one value per mechanism")
@@ -786,7 +786,14 @@ def fit_hierarchical_nuclear(
             fixed_context_effects, dtype=train_dtype, device=device
         ).clone()
     elif init_context_effects is None:
-        context_effects = torch.zeros(n_mechanisms, dtype=train_dtype, device=device)
+        initial_context = (
+            np.asarray(fixed_context_effects, dtype=np.float32)
+            if scale_fixed_context_effects
+            else np.zeros(n_mechanisms, dtype=np.float32)
+        )
+        if initial_context.shape != (n_mechanisms,) or np.any(initial_context < 0):
+            raise ValueError("fixed_context_effects must be a non-negative vector with one value per mechanism")
+        context_effects = torch.as_tensor(initial_context, dtype=train_dtype, device=device).clone()
     else:
         context_effects = torch.as_tensor(
             init_context_effects, dtype=train_dtype, device=device
