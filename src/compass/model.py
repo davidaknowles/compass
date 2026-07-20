@@ -335,6 +335,7 @@ def _backward_hierarchical_data_loss(
     ld_chunk_nnz: int | None,
     stats: dict[str, float],
     fixed_context_effects: bool = False,
+    context_profile: np.ndarray | None = None,
 ) -> tuple[float, np.ndarray, dict]:
     """Evaluate gene deviations and update context/residual effects by NNLS."""
 
@@ -411,7 +412,20 @@ def _backward_hierarchical_data_loss(
         del mediated, R2_cpu, row_ranges
         block_normals.append(block_normal)
         block_rhs.append(block_target)
-    if fixed_context_effects:
+    if context_profile is not None:
+        profile = np.asarray(context_profile, dtype=np.float64)
+        context_normal = normal[:-1, :-1]
+        context_residual = normal[:-1, -1]
+        profile_normal = np.array(
+            [
+                [profile @ context_normal @ profile, profile @ context_residual],
+                [context_residual @ profile, normal[-1, -1]],
+            ]
+        )
+        profile_rhs = np.array([profile @ rhs[:-1], rhs[-1]])
+        scale_tau = _solve_nonnegative_normal(profile_normal, profile_rhs)
+        next_effects = np.concatenate((profile * scale_tau[0], [scale_tau[1]]))
+    elif fixed_context_effects:
         fixed = context_effects.detach().float().cpu().numpy().astype(np.float64)
         tau_numerator = rhs[-1] - normal[-1, :-1] @ fixed
         tau_next = max(0.0, tau_numerator / normal[-1, -1]) if normal[-1, -1] > 0 else 0.0
@@ -422,7 +436,25 @@ def _backward_hierarchical_data_loss(
     old_quadratic = float(current_np @ normal @ current_np - 2 * current_np @ rhs)
     new_quadratic = float(next_effects @ normal @ next_effects - 2 * next_effects @ rhs)
     loss_value += (new_quadratic - old_quadratic) / max(total_den, 1)
-    if fixed_context_effects:
+    if context_profile is not None:
+        leave_one_out = []
+        profile = np.asarray(context_profile, dtype=np.float64)
+        for block_normal, block_target in zip(block_normals, block_rhs):
+            leave_normal = normal - block_normal
+            leave_rhs = rhs - block_target
+            context_normal = leave_normal[:-1, :-1]
+            context_residual = leave_normal[:-1, -1]
+            profile_normal = np.array(
+                [
+                    [profile @ context_normal @ profile, profile @ context_residual],
+                    [context_residual @ profile, leave_normal[-1, -1]],
+                ]
+            )
+            profile_rhs = np.array([profile @ leave_rhs[:-1], leave_rhs[-1]])
+            scale_tau = _solve_nonnegative_normal(profile_normal, profile_rhs)
+            leave_one_out.append(np.concatenate((profile * scale_tau[0], [scale_tau[1]])))
+        leave_one_out = np.vstack(leave_one_out)
+    elif fixed_context_effects:
         leave_one_out = []
         fixed = next_effects[:-1]
         for block_normal, block_target in zip(block_normals, block_rhs):
@@ -714,6 +746,7 @@ def fit_hierarchical_nuclear(
     init_context_effects: np.ndarray | None = None,
     fixed_context_effects: np.ndarray | None = None,
     fixed_context_effect_se: np.ndarray | None = None,
+    scale_fixed_context_effects: bool = False,
     init_tau: float = 1e-8,
     lr: float = 1e-2,
     max_iter: int = 500,
@@ -790,7 +823,8 @@ def fit_hierarchical_nuclear(
             total_den,
             ld_chunk_nnz,
             ld_stats,
-            fixed_context_effects=fixed_context_effects is not None,
+            fixed_context_effects=fixed_context_effects is not None and not scale_fixed_context_effects,
+            context_profile=fixed_context_effects if scale_fixed_context_effects else None,
         )
         context_next = torch.as_tensor(
             effects_next_np[:-1], dtype=train_dtype, device=device
@@ -806,6 +840,14 @@ def fit_hierarchical_nuclear(
             best_context_effects = context_next.detach().clone()
             if fixed_context_effect_se is None:
                 best_context_effect_se = context_diagnostics["context_effect_se"].copy()
+            elif scale_fixed_context_effects:
+                profile = np.asarray(fixed_context_effects, dtype=np.float64)
+                positive = profile > 0
+                scale = float(np.median(effects_next_np[:-1][positive] / profile[positive])) if np.any(positive) else 0.0
+                best_context_effect_se = np.sqrt(
+                    np.square(scale * np.asarray(fixed_context_effect_se, dtype=np.float64))
+                    + np.square(context_diagnostics["context_effect_se"])
+                )
             best_tau = tau_next.detach().clone()
             stalled_iterations = 0
         else:
@@ -856,7 +898,8 @@ def fit_hierarchical_nuclear(
         "grad_clip": grad_clip,
         "best_objective": best_objective,
         "context_update": "joint_nonnegative_weighted_least_squares",
-        "context_effects_fixed": fixed_context_effects is not None,
+        "context_effects_fixed": fixed_context_effects is not None and not scale_fixed_context_effects,
+        "context_effects_scaled": scale_fixed_context_effects,
         "context_effect_se": best_context_effect_se,
         "context_effect_z": np.divide(
             best_context_effects.detach().float().cpu().numpy(),
@@ -1289,6 +1332,7 @@ def fit_hierarchical_nuclear_path(
     cv: bool = True,
     fixed_context_effects: np.ndarray | None = None,
     fixed_context_effect_se: np.ndarray | None = None,
+    scale_fixed_context_effects: bool = False,
     max_lambda_extensions: int = 4,
     lambda_extension_factor: float = 3.0,
     **kwargs,
@@ -1328,6 +1372,7 @@ def fit_hierarchical_nuclear_path(
                     init_tau=init_tau,
                     fixed_context_effects=fixed_context_effects,
                     fixed_context_effect_se=fixed_context_effect_se,
+                    scale_fixed_context_effects=scale_fixed_context_effects,
                     progress_label=f"cv-fold={fold}",
                     prepared_blocks=train_blocks,
                     **kwargs,
@@ -1373,6 +1418,7 @@ def fit_hierarchical_nuclear_path(
                     init_tau=init_tau,
                     fixed_context_effects=fixed_context_effects,
                     fixed_context_effect_se=fixed_context_effect_se,
+                    scale_fixed_context_effects=scale_fixed_context_effects,
                     progress_label=f"cv-fold={fold}",
                     prepared_blocks=train_blocks,
                     **kwargs,
@@ -1421,6 +1467,7 @@ def fit_hierarchical_nuclear_path(
             init_tau=init_tau,
             fixed_context_effects=fixed_context_effects,
             fixed_context_effect_se=fixed_context_effect_se,
+            scale_fixed_context_effects=scale_fixed_context_effects,
             progress_label="full",
             prepared_blocks=prepared_blocks,
             **kwargs,

@@ -10,6 +10,7 @@ from compass.model import (
     LdChromosomeBlock,
     aggregate_context_annotations,
     fit_hierarchical_nuclear,
+    fit_hierarchical_nuclear_path,
 )
 
 
@@ -89,6 +90,40 @@ class HierarchicalModelTest(unittest.TestCase):
         np.testing.assert_array_equal(fixed_effects, fixed)
         np.testing.assert_allclose(fixed_se, [0.001, 0.002])
         self.assertTrue(metadata["context_effects_fixed"])
+
+        profile = expected_context / 2.0
+        _, scaled_effects, _, _, _, scaled_metadata = fit_hierarchical_nuclear(
+            dataset,
+            n_genes,
+            n_mechanisms,
+            lambda_value=1000.0,
+            fixed_context_effects=profile,
+            fixed_context_effect_se=np.zeros(2, dtype=np.float32),
+            scale_fixed_context_effects=True,
+            lr=1e-3,
+            max_iter=12,
+            device="cpu",
+        )
+        np.testing.assert_allclose(scaled_effects, expected_context, rtol=1e-4, atol=1e-6)
+        self.assertTrue(scaled_metadata["context_effects_scaled"])
+
+        dataset.cv_groups = np.arange(n_variants) % 2
+        dataset.cv_score_groups = dataset.cv_groups.copy()
+        path = fit_hierarchical_nuclear_path(
+            dataset,
+            n_genes,
+            n_mechanisms,
+            lambdas=[1000.0],
+            fixed_context_effects=profile,
+            fixed_context_effect_se=np.zeros(2, dtype=np.float32),
+            scale_fixed_context_effects=True,
+            max_lambda_extensions=0,
+            lr=1e-3,
+            max_iter=12,
+            device="cpu",
+        )
+        np.testing.assert_allclose(path.context_effects, expected_context, rtol=1e-4, atol=1e-6)
+        self.assertEqual(path.best_lambda, 1000.0)
 
 
 if __name__ == "__main__":

@@ -540,6 +540,9 @@ def main() -> None:
     )
     parser.add_argument("--context-effects-tsv", default=None)
     parser.add_argument(
+        "--context-effects-mode", default="scaled", choices=["fixed", "scaled"]
+    )
+    parser.add_argument(
         "--regression-weighting",
         default="auto",
         choices=["auto", "uniform", "observed_chisq"],
@@ -839,6 +842,9 @@ def main() -> None:
                 cv=not args.no_cv,
                 fixed_context_effects=fixed_context_effects,
                 fixed_context_effect_se=fixed_context_effect_se,
+                scale_fixed_context_effects=(
+                    fixed_context_effects is not None and args.context_effects_mode == "scaled"
+                ),
                 max_lambda_extensions=args.max_lambda_extensions,
                 lambda_extension_factor=args.lambda_extension_factor,
                 lr=args.lr,
@@ -916,6 +922,7 @@ def main() -> None:
         "context_effects_tsv": (
             str(Path(args.context_effects_tsv).expanduser()) if args.context_effects_tsv else None
         ),
+        "context_effects_mode": args.context_effects_mode if args.context_effects_tsv else None,
         "context_annotation_counts": (
             np.asarray(dataset.context_annotations.sum(axis=0)).ravel()
             if fit.context_effects is not None
