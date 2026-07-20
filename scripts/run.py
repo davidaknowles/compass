@@ -531,6 +531,11 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-8)
     parser.add_argument("--tol", type=float, default=1e-2)
     parser.add_argument("--no-cv", action="store_true")
+    parser.add_argument(
+        "--cv-checkpoint",
+        default=None,
+        help="Hierarchical CV checkpoint path (defaults to RUN_NAME.hierarchical_cv_checkpoint.npz)",
+    )
     parser.add_argument("--method", default="nuclear", choices=["nuclear", "hierarchical", "rank1"])
     parser.add_argument("--context-annotation", default="binary", choices=["binary", "sum"])
     parser.add_argument(
@@ -608,6 +613,14 @@ def main() -> None:
     cache_dir = Path(args.cache_dir).expanduser() if args.cache_dir else data_root / "cache"
     out_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_name = args.run_name or f"compass-{stamp}"
+    prefix = out_dir / run_name
+    cv_checkpoint_path = (
+        Path(args.cv_checkpoint).expanduser()
+        if args.cv_checkpoint
+        else Path(f"{prefix}.hierarchical_cv_checkpoint.npz")
+    )
 
     if args.device == "auto":
         import torch
@@ -845,6 +858,7 @@ def main() -> None:
                 scale_fixed_context_effects=(
                     fixed_context_effects is not None and args.context_effects_mode == "scaled"
                 ),
+                cv_checkpoint_path=cv_checkpoint_path if not args.no_cv else None,
                 max_lambda_extensions=args.max_lambda_extensions,
                 lambda_extension_factor=args.lambda_extension_factor,
                 lr=args.lr,
@@ -876,10 +890,6 @@ def main() -> None:
                 progress_every=args.progress_every,
                 progress_label="full",
             )
-
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_name = args.run_name or f"compass-{stamp}"
-    prefix = out_dir / run_name
 
     result_arrays = {
         "B": fit.B,
@@ -955,6 +965,11 @@ def main() -> None:
         "cv_component_metadata": cv_metadata,
         "cache_key": key,
         "cv": not args.no_cv,
+        "cv_checkpoint": (
+            str(cv_checkpoint_path)
+            if args.method == "hierarchical" and not args.no_cv
+            else None
+        ),
         "annotation_source": args.annotation_source,
         "abc_path": str(abc_path) if args.annotation_source == "abc" else None,
         "abc_cell_types": args.abc_cell_types if args.annotation_source == "abc" else None,

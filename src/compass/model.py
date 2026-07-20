@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+from pathlib import Path
 from time import perf_counter
 
 import numpy as np
@@ -1333,6 +1335,90 @@ def fit_nuclear_norm_path(
     return FitResult("nuclear", ordered, cv_scores, float(best), B, tau, losses_all, metadata)
 
 
+def _save_hierarchical_cv_checkpoint(path: str | Path, checkpoint: dict[str, np.ndarray]) -> None:
+    """Atomically persist resumable hierarchical CV state."""
+
+    checkpoint_path = Path(path).expanduser()
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = checkpoint_path.with_name(f".{checkpoint_path.name}.tmp-{os.getpid()}")
+    with temporary.open("wb") as handle:
+        np.savez_compressed(handle, **checkpoint)
+    os.replace(temporary, checkpoint_path)
+
+
+def _load_or_initialize_hierarchical_cv_checkpoint(
+    path: str | Path,
+    base_lambdas: list[float],
+    cv_folds: list[int],
+    n_genes: int,
+    n_mechanisms: int,
+    fixed_context_effects: np.ndarray | None,
+    scale_fixed_context_effects: bool,
+) -> dict[str, np.ndarray]:
+    """Load compatible fold states or initialize an empty checkpoint."""
+
+    checkpoint_path = Path(path).expanduser()
+    profile = (
+        np.asarray(fixed_context_effects, dtype=np.float32)
+        if fixed_context_effects is not None
+        else np.empty(0, dtype=np.float32)
+    )
+    if checkpoint_path.exists():
+        with np.load(checkpoint_path, allow_pickle=False) as archive:
+            checkpoint = {key: archive[key].copy() for key in archive.files}
+        required = {
+            "version",
+            "lambdas",
+            "folds",
+            "B",
+            "context_effects",
+            "tau",
+            "scores",
+            "next_lambda_index",
+            "fixed_context_effects",
+            "scale_fixed_context_effects",
+        }
+        missing = required.difference(checkpoint)
+        if missing:
+            raise ValueError(f"Hierarchical CV checkpoint is missing fields: {sorted(missing)}")
+        loaded_lambdas = np.asarray(checkpoint["lambdas"], dtype=np.float64)
+        expected_prefix = np.asarray(base_lambdas, dtype=np.float64)
+        compatible = (
+            int(np.asarray(checkpoint["version"]).item()) == 1
+            and loaded_lambdas.size >= expected_prefix.size
+            and np.array_equal(loaded_lambdas[: expected_prefix.size], expected_prefix)
+            and np.array_equal(checkpoint["folds"], np.asarray(cv_folds, dtype=np.int64))
+            and checkpoint["B"].shape == (len(cv_folds), n_genes, n_mechanisms)
+            and checkpoint["context_effects"].shape == (len(cv_folds), n_mechanisms)
+            and checkpoint["scores"].shape == (len(cv_folds), loaded_lambdas.size)
+            and np.array_equal(checkpoint["fixed_context_effects"], profile)
+            and bool(np.asarray(checkpoint["scale_fixed_context_effects"]).item())
+            == bool(scale_fixed_context_effects)
+        )
+        if not compatible:
+            raise ValueError(
+                "Hierarchical CV checkpoint is incompatible with the requested folds, "
+                "lambda grid, model dimensions, or context profile"
+            )
+        print(f"[fit] resuming hierarchical CV from {checkpoint_path}", flush=True)
+        return checkpoint
+
+    checkpoint = {
+        "version": np.asarray(1, dtype=np.int64),
+        "lambdas": np.asarray(base_lambdas, dtype=np.float64),
+        "folds": np.asarray(cv_folds, dtype=np.int64),
+        "B": np.zeros((len(cv_folds), n_genes, n_mechanisms), dtype=np.float32),
+        "context_effects": np.zeros((len(cv_folds), n_mechanisms), dtype=np.float32),
+        "tau": np.full(len(cv_folds), 1e-8, dtype=np.float32),
+        "scores": np.full((len(cv_folds), len(base_lambdas)), np.nan, dtype=np.float64),
+        "next_lambda_index": np.zeros(len(cv_folds), dtype=np.int64),
+        "fixed_context_effects": profile,
+        "scale_fixed_context_effects": np.asarray(scale_fixed_context_effects, dtype=np.bool_),
+    }
+    _save_hierarchical_cv_checkpoint(checkpoint_path, checkpoint)
+    return checkpoint
+
+
 def fit_hierarchical_nuclear_path(
     dataset: CompassDataset,
     n_genes: int,
@@ -1342,6 +1428,7 @@ def fit_hierarchical_nuclear_path(
     fixed_context_effects: np.ndarray | None = None,
     fixed_context_effect_se: np.ndarray | None = None,
     scale_fixed_context_effects: bool = False,
+    cv_checkpoint_path: str | Path | None = None,
     max_lambda_extensions: int = 4,
     lambda_extension_factor: float = 3.0,
     **kwargs,
@@ -1359,18 +1446,53 @@ def fit_hierarchical_nuclear_path(
             raise ValueError("LD-component CV groups are required")
         groups = np.asarray(dataset.cv_groups)
         cv_folds = sorted(int(value) for value in np.unique(groups) if int(value) >= 0)
+        base_lambdas = ordered.copy()
+        checkpoint = None
+        if cv_checkpoint_path is not None:
+            checkpoint = _load_or_initialize_hierarchical_cv_checkpoint(
+                cv_checkpoint_path,
+                base_lambdas,
+                cv_folds,
+                n_genes,
+                n_mechanisms,
+                fixed_context_effects,
+                scale_fixed_context_effects,
+            )
+            ordered = checkpoint["lambdas"].tolist()
         fold_scores: dict[float, list[float]] = {value: [] for value in ordered}
+        if checkpoint is not None:
+            for lambda_index, value in enumerate(ordered):
+                fold_scores[value] = checkpoint["scores"][:, lambda_index][
+                    np.isfinite(checkpoint["scores"][:, lambda_index])
+                ].tolist()
         fold_states: dict[int, tuple[np.ndarray, np.ndarray, float]] = {}
-        for fold in cv_folds:
+        for fold_index, fold in enumerate(cv_folds):
+            start_index = (
+                int(checkpoint["next_lambda_index"][fold_index])
+                if checkpoint is not None
+                else 0
+            )
+            if start_index:
+                fold_states[fold] = (
+                    checkpoint["B"][fold_index].copy(),
+                    checkpoint["context_effects"][fold_index].copy(),
+                    float(checkpoint["tau"][fold_index]),
+                )
+            if start_index >= len(ordered):
+                continue
             train_blocks = []
             for block in prepared_blocks:
                 block_groups = block["cv_groups"]
                 train_weight = block["weight"] * block_groups.ne(fold).to(block["weight"].dtype)
                 train_blocks.append({**block, "weight": train_weight})
-            init_B = None
-            init_context = None
-            init_tau = 1e-8
-            for lambda_value in ordered:
+            if start_index:
+                init_B, init_context, init_tau = fold_states[fold]
+            else:
+                init_B = None
+                init_context = None
+                init_tau = 1e-8
+            for lambda_index in range(start_index, len(ordered)):
+                lambda_value = ordered[lambda_index]
                 B, context_effects, _, tau, _, _ = fit_hierarchical_nuclear(
                     dataset,
                     n_genes,
@@ -1386,31 +1508,46 @@ def fit_hierarchical_nuclear_path(
                     prepared_blocks=train_blocks,
                     **kwargs,
                 )
-                fold_scores[lambda_value].append(
-                    _evaluate_fit_mse(
-                        prepared_blocks,
-                        B,
-                        tau,
-                        kwargs.get("device", "cpu"),
-                        kwargs.get("ld_chunk_nnz"),
-                        fold=fold,
-                        context_effects=context_effects,
-                    )
+                score = _evaluate_fit_mse(
+                    prepared_blocks,
+                    B,
+                    tau,
+                    kwargs.get("device", "cpu"),
+                    kwargs.get("ld_chunk_nnz"),
+                    fold=fold,
+                    context_effects=context_effects,
                 )
+                fold_scores[lambda_value].append(score)
                 init_B = B
                 init_context = context_effects
                 init_tau = tau
+                fold_states[fold] = (B, context_effects, tau)
+                if checkpoint is not None:
+                    checkpoint["B"][fold_index] = B
+                    checkpoint["context_effects"][fold_index] = context_effects
+                    checkpoint["tau"][fold_index] = tau
+                    checkpoint["scores"][fold_index, lambda_index] = score
+                    checkpoint["next_lambda_index"][fold_index] = lambda_index + 1
+                    _save_hierarchical_cv_checkpoint(cv_checkpoint_path, checkpoint)
             fold_states[fold] = (init_B, init_context, init_tau)
             del train_blocks
         cv_scores = {value: float(np.mean(scores)) for value, scores in fold_scores.items()}
-        extensions = 0
+        extensions = max(0, len(ordered) - len(base_lambdas))
         while (
             extensions < max_lambda_extensions
             and min(cv_scores, key=cv_scores.get) == min(cv_scores)
         ):
             next_lambda = min(cv_scores) / lambda_extension_factor
+            if next_lambda in cv_scores:
+                break
+            if checkpoint is not None:
+                checkpoint["lambdas"] = np.append(checkpoint["lambdas"], next_lambda)
+                checkpoint["scores"] = np.column_stack(
+                    (checkpoint["scores"], np.full(len(cv_folds), np.nan, dtype=np.float64))
+                )
+                ordered = checkpoint["lambdas"].tolist()
             extension_scores = []
-            for fold in cv_folds:
+            for fold_index, fold in enumerate(cv_folds):
                 train_blocks = []
                 for block in prepared_blocks:
                     block_groups = block["cv_groups"]
@@ -1444,10 +1581,18 @@ def fit_hierarchical_nuclear_path(
                     )
                 )
                 fold_states[fold] = (B, context_effects, tau)
+                if checkpoint is not None:
+                    checkpoint["B"][fold_index] = B
+                    checkpoint["context_effects"][fold_index] = context_effects
+                    checkpoint["tau"][fold_index] = tau
+                    checkpoint["scores"][fold_index, -1] = extension_scores[-1]
+                    checkpoint["next_lambda_index"][fold_index] = len(ordered)
+                    _save_hierarchical_cv_checkpoint(cv_checkpoint_path, checkpoint)
                 del train_blocks
             cv_scores[next_lambda] = float(np.mean(extension_scores))
-            ordered.append(next_lambda)
-            ordered.sort(reverse=True)
+            if checkpoint is None:
+                ordered.append(next_lambda)
+                ordered.sort(reverse=True)
             extensions += 1
     best = min(cv_scores, key=cv_scores.get) if cv_scores else ordered[-1]
     metadata = {
@@ -1456,6 +1601,7 @@ def fit_hierarchical_nuclear_path(
         "context_update": "joint_nonnegative_weighted_least_squares",
         "lambda_extensions": max(0, len(ordered) - len({float(value) for value in lambdas})),
         "lambda_extension_factor": lambda_extension_factor,
+        "cv_checkpoint_path": str(cv_checkpoint_path) if cv_checkpoint_path is not None else None,
     }
     init_B = None
     init_context = None
