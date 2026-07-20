@@ -765,6 +765,8 @@ def fit_hierarchical_nuclear(
     progress_label: str = "fit",
     prepared_blocks: list[dict] | None = None,
     objective_improve_tol: float = 1e-6,
+    objective_relative_tol: float = 1e-5,
+    objective_window: int = 10,
     stagnation_patience: int = 25,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, list[float], dict]:
     """Fit unpenalized context effects plus nuclear-penalized gene deviations."""
@@ -821,6 +823,7 @@ def fit_hierarchical_nuclear(
     )
     best_tau = tau.detach().clone()
     stalled_iterations = 0
+    convergence_reason = "max_iterations"
     for it in range(max_iter):
         if B.grad is not None:
             B.grad.zero_()
@@ -881,6 +884,14 @@ def fit_hierarchical_nuclear(
             context_effects.copy_(context_next)
             tau.copy_(tau_next)
         losses.append(objective)
+        objective_converged = False
+        if len(losses) > objective_window:
+            previous_objective = losses[-objective_window - 1]
+            objective_converged = (
+                abs(previous_objective - objective)
+                / max(abs(previous_objective), 1.0)
+                < objective_relative_tol
+            )
         if progress_every and (it == 0 or (it + 1) % progress_every == 0):
             print(
                 f"[fit] {progress_label} lambda={lambda_value:g} iteration={it + 1} "
@@ -888,7 +899,17 @@ def fit_hierarchical_nuclear(
                 f"stalled={stalled_iterations}",
                 flush=True,
             )
-        if it > 10 and (float(delta.detach().cpu()) < tol or stalled_iterations >= stagnation_patience):
+        if it > 10 and (
+            float(delta.detach().cpu()) < tol
+            or objective_converged
+            or stalled_iterations >= stagnation_patience
+        ):
+            if objective_converged:
+                convergence_reason = "relative_objective"
+            elif stalled_iterations >= stagnation_patience:
+                convergence_reason = "objective_stagnation"
+            else:
+                convergence_reason = "relative_parameters"
             break
     with torch.no_grad():
         B.copy_(best_B)
@@ -920,6 +941,9 @@ def fit_hierarchical_nuclear(
         ),
         "jackknife_blocks": context_diagnostics["jackknife_blocks"],
         "objective_improve_tol": objective_improve_tol,
+        "objective_relative_tol": objective_relative_tol,
+        "objective_window": objective_window,
+        "convergence_reason": convergence_reason,
         "stagnation_patience": stagnation_patience,
         "model_dtype": model_dtype,
         "ld_dtype": "float16",

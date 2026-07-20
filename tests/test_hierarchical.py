@@ -130,6 +130,22 @@ class HierarchicalModelTest(unittest.TestCase):
             warm_metadata["initial_context_effects"], warm_context, rtol=0, atol=0
         )
 
+        _, _, _, _, objective_losses, objective_metadata = fit_hierarchical_nuclear(
+            dataset,
+            n_genes,
+            n_mechanisms,
+            lambda_value=1_000.0,
+            fixed_context_effects=profile,
+            scale_fixed_context_effects=True,
+            max_iter=40,
+            tol=0.0,
+            objective_relative_tol=1.0,
+            objective_window=2,
+            lr=1e-3,
+        )
+        self.assertLess(len(objective_losses), 40)
+        self.assertEqual(objective_metadata["convergence_reason"], "relative_objective")
+
         dataset.cv_groups = np.arange(n_variants) % 2
         dataset.cv_score_groups = dataset.cv_groups.copy()
         with TemporaryDirectory() as temporary_directory:

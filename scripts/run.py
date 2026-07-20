@@ -530,6 +530,8 @@ def main() -> None:
     parser.add_argument("--progress-every", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-8)
     parser.add_argument("--tol", type=float, default=1e-2)
+    parser.add_argument("--objective-relative-tol", type=float, default=1e-5)
+    parser.add_argument("--objective-window", type=int, default=10)
     parser.add_argument("--no-cv", action="store_true")
     parser.add_argument(
         "--cv-checkpoint",
@@ -583,6 +585,10 @@ def main() -> None:
         parser.error("--cv-r2-threshold cannot be below --ld-r2-cutoff")
     if args.open_chromatin_tss_window < 0:
         parser.error("--open-chromatin-tss-window must be non-negative")
+    if args.objective_relative_tol < 0:
+        parser.error("--objective-relative-tol must be non-negative")
+    if args.objective_window < 1:
+        parser.error("--objective-window must be positive")
     if args.method == "rank1" and args.init_b_tsv is None:
         parser.error("--method rank1 requires --init-b-tsv")
     if args.context_effects_tsv is not None and args.method != "hierarchical":
@@ -865,6 +871,8 @@ def main() -> None:
                 max_iter=args.max_iter,
                 progress_every=args.progress_every,
                 tol=args.tol,
+                objective_relative_tol=args.objective_relative_tol,
+                objective_window=args.objective_window,
                 device=device,
                 model_dtype=args.model_dtype,
                 svd_method=args.svd_method,
