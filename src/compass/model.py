@@ -798,6 +798,7 @@ def fit_hierarchical_nuclear(
         context_effects = torch.as_tensor(
             init_context_effects, dtype=train_dtype, device=device
         ).clone()
+    initial_context_effects_used = context_effects.detach().float().cpu().numpy().copy()
     tau = torch.tensor(max(float(init_tau), 0.0), dtype=train_dtype, device=device)
 
     losses: list[float] = []
@@ -907,6 +908,7 @@ def fit_hierarchical_nuclear(
         "context_update": "joint_nonnegative_weighted_least_squares",
         "context_effects_fixed": fixed_context_effects is not None and not scale_fixed_context_effects,
         "context_effects_scaled": scale_fixed_context_effects,
+        "initial_context_effects": initial_context_effects_used,
         "context_effect_se": best_context_effect_se,
         "context_effect_z": np.divide(
             best_context_effects.detach().float().cpu().numpy(),

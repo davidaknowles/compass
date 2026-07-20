@@ -106,6 +106,27 @@ class HierarchicalModelTest(unittest.TestCase):
         )
         np.testing.assert_allclose(scaled_effects, expected_context, rtol=1e-4, atol=1e-6)
         self.assertTrue(scaled_metadata["context_effects_scaled"])
+        np.testing.assert_allclose(
+            scaled_metadata["initial_context_effects"], profile, rtol=0, atol=0
+        )
+
+        warm_context = np.array([0.5, 1.0], dtype=np.float32)
+        _, _, _, _, _, warm_metadata = fit_hierarchical_nuclear(
+            dataset,
+            n_genes,
+            n_mechanisms,
+            lambda_value=1_000.0,
+            init_context_effects=warm_context,
+            fixed_context_effects=profile,
+            fixed_context_effect_se=np.zeros(2, dtype=np.float32),
+            scale_fixed_context_effects=True,
+            max_iter=12,
+            lr=1e-2,
+            tol=1e-8,
+        )
+        np.testing.assert_allclose(
+            warm_metadata["initial_context_effects"], warm_context, rtol=0, atol=0
+        )
 
         dataset.cv_groups = np.arange(n_variants) % 2
         dataset.cv_score_groups = dataset.cv_groups.copy()
