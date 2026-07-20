@@ -5,6 +5,7 @@ from time import perf_counter
 
 import numpy as np
 import scipy.sparse as sp
+from scipy.optimize import nnls
 import torch
 
 from .ld import iter_csr_row_ranges, scipy_csr_rows_to_torch_sparse, scipy_to_torch_sparse
@@ -23,11 +24,13 @@ class CompassDataset:
     chisq: np.ndarray
     chrom: np.ndarray
     n_samples: float | np.ndarray
+    position: np.ndarray | None = None
     R2: sp.csr_matrix | None = None
     ld_blocks: list[LdChromosomeBlock] | None = None
     sample_weight: np.ndarray | None = None
     cv_groups: np.ndarray | None = None
     cv_score_groups: np.ndarray | None = None
+    context_annotations: sp.csr_matrix | None = None
 
     @property
     def n_variants(self) -> int:
@@ -48,6 +51,8 @@ class FitResult:
     tau: float
     losses: list[float]
     metadata: dict
+    context_effects: np.ndarray | None = None
+    context_effect_se: np.ndarray | None = None
 
 
 def _weights(chisq: torch.Tensor, weights: np.ndarray | None, device: str) -> torch.Tensor:
@@ -59,6 +64,33 @@ def _weights(chisq: torch.Tensor, weights: np.ndarray | None, device: str) -> to
 
 def _flatten_B(B: torch.Tensor) -> torch.Tensor:
     return B.reshape(-1)
+
+
+def aggregate_context_annotations(
+    annotation: sp.csr_matrix,
+    n_genes: int,
+    n_mechanisms: int,
+    mode: str = "binary",
+    excluded_mechanisms: set[int] | None = None,
+) -> sp.csr_matrix:
+    """Aggregate gene-level annotations into one direct annotation per context."""
+
+    if annotation.shape[1] != n_genes * n_mechanisms:
+        raise ValueError("annotation shape does not match gene/mechanism dimensions")
+    if mode not in {"binary", "sum"}:
+        raise ValueError("context annotation mode must be 'binary' or 'sum'")
+    excluded = set() if excluded_mechanisms is None else set(excluded_mechanisms)
+    columns = []
+    for mechanism in range(n_mechanisms):
+        if mechanism in excluded:
+            columns.append(sp.csr_matrix((annotation.shape[0], 1), dtype=np.float32))
+            continue
+        gene_columns = np.arange(mechanism, annotation.shape[1], n_mechanisms, dtype=np.int64)
+        values = np.asarray(annotation[:, gene_columns].sum(axis=1)).ravel().astype(np.float32)
+        if mode == "binary":
+            values = (values > 0).astype(np.float32)
+        columns.append(sp.csr_matrix(values[:, None]))
+    return sp.hstack(columns, format="csr", dtype=np.float32)
 
 
 def _relative_change(next_value: torch.Tensor, current_value: torch.Tensor) -> torch.Tensor:
@@ -148,8 +180,7 @@ def _prepare_fit_blocks(
             np.asarray(dataset.n_samples)[rows] if np.ndim(dataset.n_samples) > 0 else dataset.n_samples,
             device,
         )
-        block_specs.append(
-            {
+        block_spec = {
                 "chrom": block.chrom,
                 "rows": rows,
                 "A_t": scipy_to_torch_sparse(A_block, device=device, dtype=torch.float32),
@@ -170,7 +201,31 @@ def _prepare_fit_blocks(
                     else torch.as_tensor(dataset.cv_score_groups[rows], dtype=torch.int64, device=device)
                 ),
             }
-        )
+        if dataset.context_annotations is not None:
+            context_block = dataset.context_annotations[rows].astype(np.float32)
+            if context_block.shape[1] == 0:
+                raise ValueError("context_annotations must have at least one column")
+            if torch.device(device).type == "cuda":
+                context_t = torch.as_tensor(context_block.toarray(), dtype=torch.float16, device=device)
+                context_ld_chunks = []
+                for start, end in iter_csr_row_ranges(R2_block, 150_000_000):
+                    R2_t = scipy_csr_rows_to_torch_sparse(
+                        R2_block,
+                        start,
+                        end,
+                        device=device,
+                        dtype=torch.float16,
+                        index_dtype=_ld_index_dtype(device),
+                    )
+                    context_ld_chunks.append(torch.sparse.mm(R2_t, context_t).float())
+                    del R2_t
+                block_spec["context_ld"] = torch.cat(context_ld_chunks, dim=0)
+                del context_t, context_ld_chunks
+            else:
+                block_spec["context_ld"] = torch.as_tensor(
+                    R2_block @ context_block.toarray(), dtype=torch.float32, device=device
+                )
+        block_specs.append(block_spec)
     return block_specs
 
 
@@ -250,6 +305,154 @@ def _backward_data_loss(
     return loss_value, tau_numerator, tau_denominator
 
 
+def _solve_nonnegative_normal(normal: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+    """Solve a small non-negative least-squares problem from normal equations."""
+
+    normal = np.asarray(normal, dtype=np.float64)
+    rhs = np.asarray(rhs, dtype=np.float64)
+    scale = np.sqrt(np.maximum(np.diag(normal), np.finfo(np.float64).tiny))
+    scaled_normal = normal / np.outer(scale, scale)
+    scaled_rhs = rhs / scale
+    scaled_normal = 0.5 * (scaled_normal + scaled_normal.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(scaled_normal)
+    keep = eigenvalues > max(float(eigenvalues.max(initial=0.0)) * 1e-10, 1e-12)
+    if not np.any(keep):
+        return np.zeros_like(rhs)
+    roots = np.sqrt(eigenvalues[keep])
+    design = roots[:, None] * eigenvectors[:, keep].T
+    target = (eigenvectors[:, keep].T @ scaled_rhs) / roots
+    scaled_solution, _ = nnls(design, target)
+    return scaled_solution / scale
+
+
+def _backward_hierarchical_data_loss(
+    block_specs: list[dict],
+    B: torch.Tensor,
+    context_effects: torch.Tensor,
+    tau: torch.Tensor,
+    device: str,
+    total_den: int,
+    ld_chunk_nnz: int | None,
+    stats: dict[str, float],
+    fixed_context_effects: bool = False,
+) -> tuple[float, np.ndarray, dict]:
+    """Evaluate gene deviations and update context/residual effects by NNLS."""
+
+    loss_value = 0.0
+    n_contexts = int(context_effects.numel())
+    normal = np.zeros((n_contexts + 1, n_contexts + 1), dtype=np.float64)
+    rhs = np.zeros(n_contexts + 1, dtype=np.float64)
+    block_normals = []
+    block_rhs = []
+    current = torch.cat((context_effects.float(), tau.float().reshape(1)))
+    ld_layout = _ld_torch_layout(device)
+    ld_index_dtype = _ld_index_dtype(device)
+    for block in block_specs:
+        if "context_ld" not in block:
+            raise ValueError("hierarchical fitting requires context annotations")
+        R2_cpu = _block_r2_cpu(block)
+        block_normal = np.zeros_like(normal)
+        block_target = np.zeros_like(rhs)
+        mediated = torch.sparse.mm(
+            block["A_t"], _flatten_B(B).to(block["A_t"].dtype).unsqueeze(1)
+        ).squeeze(1)
+        row_ranges = list(iter_csr_row_ranges(R2_cpu, ld_chunk_nnz))
+        for chunk_index, (start, end) in enumerate(row_ranges):
+            stats["ld_chunks"] += 1
+            stats["ld_chunk_nnz_total"] += int(R2_cpu.indptr[end] - R2_cpu.indptr[start])
+            chunk_start = perf_counter()
+            if ld_layout == "csr":
+                R2_t = scipy_csr_rows_to_torch_sparse(
+                    R2_cpu,
+                    start,
+                    end,
+                    device=device,
+                    dtype=torch.float16,
+                    index_dtype=ld_index_dtype,
+                )
+            else:
+                R2_t = scipy_to_torch_sparse(
+                    R2_cpu[start:end],
+                    device=device,
+                    dtype=torch.float32,
+                    layout=ld_layout,
+                    index_dtype=ld_index_dtype,
+                )
+            stats["ld_sparse_convert_seconds"] += perf_counter() - chunk_start
+            eval_start = perf_counter()
+            smoothed = torch.sparse.mm(
+                R2_t, mediated.to(R2_t.dtype).unsqueeze(1)
+            ).squeeze(1).float()
+            n_samples = _slice_vector(block["n_samples"], start, end)
+            context_design = block["context_ld"][start:end] * (
+                n_samples if n_samples.ndim == 0 else n_samples.unsqueeze(1)
+            )
+            ld_term = n_samples * block["ld_score"][start:end]
+            design = torch.cat((context_design, ld_term.unsqueeze(1)), dim=1)
+            gene_prediction = 1.0 + n_samples * smoothed
+            pred = gene_prediction + design @ current
+            residual = block["chisq"][start:end] - pred
+            weight = block["weight"][start:end]
+            loss_block = torch.sum(weight * residual.square()) / max(total_den, 1)
+            loss_value += float(loss_block.detach().cpu())
+            target_without_context = residual + design @ current
+            weighted_design = design * weight.unsqueeze(1)
+            chunk_normal = (design.T @ weighted_design).detach().cpu().numpy()
+            chunk_target = (design.T @ (weight * target_without_context)).detach().cpu().numpy()
+            normal += chunk_normal
+            rhs += chunk_target
+            block_normal += chunk_normal
+            block_target += chunk_target
+            loss_block.backward(retain_graph=chunk_index + 1 < len(row_ranges))
+            if torch.device(device).type == "cuda" and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            stats["ld_eval_backward_seconds"] += perf_counter() - eval_start
+            del R2_t, smoothed, context_design, ld_term, design, pred, residual, loss_block
+        del mediated, R2_cpu, row_ranges
+        block_normals.append(block_normal)
+        block_rhs.append(block_target)
+    if fixed_context_effects:
+        fixed = context_effects.detach().float().cpu().numpy().astype(np.float64)
+        tau_numerator = rhs[-1] - normal[-1, :-1] @ fixed
+        tau_next = max(0.0, tau_numerator / normal[-1, -1]) if normal[-1, -1] > 0 else 0.0
+        next_effects = np.concatenate((fixed, [tau_next]))
+    else:
+        next_effects = _solve_nonnegative_normal(normal, rhs)
+    current_np = current.detach().cpu().numpy()
+    old_quadratic = float(current_np @ normal @ current_np - 2 * current_np @ rhs)
+    new_quadratic = float(next_effects @ normal @ next_effects - 2 * next_effects @ rhs)
+    loss_value += (new_quadratic - old_quadratic) / max(total_den, 1)
+    if fixed_context_effects:
+        leave_one_out = []
+        fixed = next_effects[:-1]
+        for block_normal, block_target in zip(block_normals, block_rhs):
+            leave_normal = normal - block_normal
+            leave_rhs = rhs - block_target
+            numerator = leave_rhs[-1] - leave_normal[-1, :-1] @ fixed
+            leave_tau = max(0.0, numerator / leave_normal[-1, -1]) if leave_normal[-1, -1] > 0 else 0.0
+            leave_one_out.append(np.concatenate((fixed, [leave_tau])))
+        leave_one_out = np.vstack(leave_one_out)
+    else:
+        leave_one_out = np.vstack(
+            [
+                _solve_nonnegative_normal(normal - block_normal, rhs - block_target)
+                for block_normal, block_target in zip(block_normals, block_rhs)
+            ]
+        )
+    jackknife_mean = leave_one_out.mean(axis=0)
+    jackknife_se = np.sqrt(
+        (leave_one_out.shape[0] - 1)
+        / leave_one_out.shape[0]
+        * np.square(leave_one_out - jackknife_mean).sum(axis=0)
+    )
+    diagnostics = {
+        "context_effect_se": jackknife_se[:-1],
+        "tau_se": float(jackknife_se[-1]),
+        "jackknife_blocks": int(leave_one_out.shape[0]),
+    }
+    return loss_value, next_effects, diagnostics
+
+
 def _evaluate_fit_mse(
     block_specs: list[dict],
     B: np.ndarray,
@@ -257,11 +460,13 @@ def _evaluate_fit_mse(
     device: str,
     ld_chunk_nnz: int | None,
     fold: int | None = None,
+    context_effects: np.ndarray | None = None,
 ) -> float:
     """Evaluate an LD-component fold without rebuilding LD subsets."""
 
     B_t = torch.as_tensor(B, dtype=torch.float32, device=device)
     tau_t = torch.tensor(float(tau), dtype=torch.float32, device=device)
+    context_t = None if context_effects is None else torch.as_tensor(context_effects, dtype=torch.float32, device=device)
     total_squared_error = 0.0
     total_rows = 0
     ld_layout = _ld_torch_layout(device)
@@ -294,6 +499,10 @@ def _evaluate_fit_mse(
                 pred = 1.0 + _slice_vector(block["n_samples"], start, end) * (
                     smoothed + tau_t * block["ld_score"][start:end]
                 )
+                if context_t is not None:
+                    pred = pred + _slice_vector(block["n_samples"], start, end) * (
+                        block["context_ld"][start:end] @ context_t
+                    )
                 residual = block["chisq"][start:end] - pred
                 if fold is None:
                     total_squared_error += float(torch.sum(residual.square()).cpu())
@@ -490,6 +699,181 @@ def fit_nuclear_norm(
     }
     return (
         B.detach().float().cpu().numpy(),
+        float(tau.detach().cpu()),
+        losses,
+        metadata,
+    )
+
+
+def fit_hierarchical_nuclear(
+    dataset: CompassDataset,
+    n_genes: int,
+    n_mechanisms: int,
+    lambda_value: float,
+    init_B: np.ndarray | None = None,
+    init_context_effects: np.ndarray | None = None,
+    fixed_context_effects: np.ndarray | None = None,
+    fixed_context_effect_se: np.ndarray | None = None,
+    init_tau: float = 1e-8,
+    lr: float = 1e-2,
+    max_iter: int = 500,
+    tol: float = 1e-6,
+    device: str = "cpu",
+    svd_method: str = "auto",
+    svd_rank: int | None = None,
+    svd_oversamples: int = 5,
+    svd_n_iter: int = 2,
+    grad_clip: float | None = 1.0,
+    model_dtype: str = "float32",
+    ld_chunk_nnz: int | None = 150_000_000,
+    progress_every: int = 0,
+    progress_label: str = "fit",
+    prepared_blocks: list[dict] | None = None,
+    objective_improve_tol: float = 1e-6,
+    stagnation_patience: int = 25,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, list[float], dict]:
+    """Fit unpenalized context effects plus nuclear-penalized gene deviations."""
+
+    if dataset.context_annotations is None:
+        raise ValueError("hierarchical fitting requires dataset.context_annotations")
+    if dataset.context_annotations.shape != (dataset.n_variants, n_mechanisms):
+        raise ValueError("context_annotations must have one column per mechanism")
+    train_dtype = _torch_dtype(model_dtype)
+    block_specs = _prepare_fit_blocks(dataset, device) if prepared_blocks is None else prepared_blocks
+    total_den = int(sum(int(torch.count_nonzero(block["weight"]).item()) for block in block_specs))
+    if init_B is None:
+        B = torch.zeros((n_genes, n_mechanisms), dtype=train_dtype, device=device, requires_grad=True)
+    else:
+        B = torch.as_tensor(init_B, dtype=train_dtype, device=device).clone().requires_grad_(True)
+    if fixed_context_effects is not None:
+        fixed_context_effects = np.asarray(fixed_context_effects, dtype=np.float32)
+        if fixed_context_effects.shape != (n_mechanisms,) or np.any(fixed_context_effects < 0):
+            raise ValueError("fixed_context_effects must be a non-negative vector with one value per mechanism")
+        context_effects = torch.as_tensor(
+            fixed_context_effects, dtype=train_dtype, device=device
+        ).clone()
+    elif init_context_effects is None:
+        context_effects = torch.zeros(n_mechanisms, dtype=train_dtype, device=device)
+    else:
+        context_effects = torch.as_tensor(
+            init_context_effects, dtype=train_dtype, device=device
+        ).clone()
+    tau = torch.tensor(max(float(init_tau), 0.0), dtype=train_dtype, device=device)
+
+    losses: list[float] = []
+    start = perf_counter()
+    ld_stats = {
+        "ld_chunks": 0,
+        "ld_chunk_nnz_total": 0,
+        "ld_sparse_convert_seconds": 0.0,
+        "ld_eval_backward_seconds": 0.0,
+    }
+    best_objective = np.inf
+    best_B = B.detach().clone()
+    best_context_effects = context_effects.detach().clone()
+    best_context_effect_se = (
+        np.asarray(fixed_context_effect_se, dtype=np.float64).copy()
+        if fixed_context_effect_se is not None
+        else np.full(n_mechanisms, np.nan, dtype=np.float64)
+    )
+    best_tau = tau.detach().clone()
+    stalled_iterations = 0
+    for it in range(max_iter):
+        if B.grad is not None:
+            B.grad.zero_()
+        data_loss, effects_next_np, context_diagnostics = _backward_hierarchical_data_loss(
+            block_specs,
+            B,
+            context_effects,
+            tau,
+            device,
+            total_den,
+            ld_chunk_nnz,
+            ld_stats,
+            fixed_context_effects=fixed_context_effects is not None,
+        )
+        context_next = torch.as_tensor(
+            effects_next_np[:-1], dtype=train_dtype, device=device
+        )
+        tau_next = torch.as_tensor(effects_next_np[-1], dtype=train_dtype, device=device)
+        regularization = float(
+            lambda_value * torch.linalg.matrix_norm(B.float(), ord="nuc").detach().cpu()
+        )
+        objective = data_loss + regularization
+        if np.isfinite(objective) and objective < best_objective - objective_improve_tol:
+            best_objective = objective
+            best_B = B.detach().clone()
+            best_context_effects = context_next.detach().clone()
+            if fixed_context_effect_se is None:
+                best_context_effect_se = context_diagnostics["context_effect_se"].copy()
+            best_tau = tau_next.detach().clone()
+            stalled_iterations = 0
+        else:
+            stalled_iterations += 1
+        with torch.no_grad():
+            b_grad = torch.nan_to_num(B.grad, nan=0.0, posinf=0.0, neginf=0.0)
+            if grad_clip is not None:
+                b_grad = torch.clamp(b_grad, min=-grad_clip, max=grad_clip)
+            B_next = nuclear_prox_nonnegative(
+                (B - lr * b_grad).float(),
+                lr * lambda_value,
+                svd_method=svd_method,
+                svd_rank=svd_rank,
+                svd_oversamples=svd_oversamples,
+                svd_n_iter=svd_n_iter,
+            ).to(train_dtype)
+            b_delta = _relative_change(B_next, B)
+            context_delta = _relative_change(context_next, context_effects)
+            delta = torch.maximum(b_delta, context_delta)
+            B.copy_(B_next)
+            context_effects.copy_(context_next)
+            tau.copy_(tau_next)
+        losses.append(objective)
+        if progress_every and (it == 0 or (it + 1) % progress_every == 0):
+            print(
+                f"[fit] {progress_label} lambda={lambda_value:g} iteration={it + 1} "
+                f"objective={objective:.6g} relative_change={float(delta.detach().cpu()):.3g} "
+                f"stalled={stalled_iterations}",
+                flush=True,
+            )
+        if it > 10 and (float(delta.detach().cpu()) < tol or stalled_iterations >= stagnation_patience):
+            break
+    with torch.no_grad():
+        B.copy_(best_B)
+        context_effects.copy_(best_context_effects)
+        tau.copy_(best_tau)
+    metadata = {
+        "iterations": len(losses),
+        "seconds": perf_counter() - start,
+        "ld_blocks": len(block_specs),
+        "ld_gpu_layout": _ld_torch_layout(device),
+        "ld_index_dtype": str(_ld_index_dtype(device)).replace("torch.", ""),
+        "ld_nnz": int(sum(block["R2_nnz"] for block in block_specs)),
+        "ld_chunk_nnz": ld_chunk_nnz,
+        **ld_stats,
+        "svd_method": svd_method,
+        "svd_rank": svd_rank,
+        "grad_clip": grad_clip,
+        "best_objective": best_objective,
+        "context_update": "joint_nonnegative_weighted_least_squares",
+        "context_effects_fixed": fixed_context_effects is not None,
+        "context_effect_se": best_context_effect_se,
+        "context_effect_z": np.divide(
+            best_context_effects.detach().float().cpu().numpy(),
+            best_context_effect_se,
+            out=np.zeros_like(best_context_effect_se),
+            where=best_context_effect_se > 0,
+        ),
+        "jackknife_blocks": context_diagnostics["jackknife_blocks"],
+        "objective_improve_tol": objective_improve_tol,
+        "stagnation_patience": stagnation_patience,
+        "model_dtype": model_dtype,
+        "ld_dtype": "float16",
+    }
+    return (
+        B.detach().float().cpu().numpy(),
+        context_effects.detach().float().cpu().numpy(),
+        best_context_effect_se.astype(np.float32),
         float(tau.detach().cpu()),
         losses,
         metadata,
@@ -895,6 +1279,172 @@ def fit_nuclear_norm_path(
             break
     assert B is not None
     return FitResult("nuclear", ordered, cv_scores, float(best), B, tau, losses_all, metadata)
+
+
+def fit_hierarchical_nuclear_path(
+    dataset: CompassDataset,
+    n_genes: int,
+    n_mechanisms: int,
+    lambdas: list[float],
+    cv: bool = True,
+    fixed_context_effects: np.ndarray | None = None,
+    fixed_context_effect_se: np.ndarray | None = None,
+    max_lambda_extensions: int = 4,
+    lambda_extension_factor: float = 3.0,
+    **kwargs,
+) -> FitResult:
+    """Fit a context-main-effect model with nuclear-regularized gene deviations."""
+
+    if dataset.context_annotations is None:
+        raise ValueError("hierarchical fitting requires context annotations")
+    ordered = sorted({float(value) for value in lambdas}, reverse=True)
+    prepared_blocks = _prepare_fit_blocks(dataset, kwargs.get("device", "cpu"))
+    cv_scores: dict[float, float] | None = None
+    cv_folds = None
+    if cv:
+        if dataset.cv_groups is None or dataset.cv_score_groups is None:
+            raise ValueError("LD-component CV groups are required")
+        groups = np.asarray(dataset.cv_groups)
+        cv_folds = sorted(int(value) for value in np.unique(groups) if int(value) >= 0)
+        fold_scores: dict[float, list[float]] = {value: [] for value in ordered}
+        fold_states: dict[int, tuple[np.ndarray, np.ndarray, float]] = {}
+        for fold in cv_folds:
+            train_blocks = []
+            for block in prepared_blocks:
+                block_groups = block["cv_groups"]
+                train_weight = block["weight"] * block_groups.ne(fold).to(block["weight"].dtype)
+                train_blocks.append({**block, "weight": train_weight})
+            init_B = None
+            init_context = None
+            init_tau = 1e-8
+            for lambda_value in ordered:
+                B, context_effects, _, tau, _, _ = fit_hierarchical_nuclear(
+                    dataset,
+                    n_genes,
+                    n_mechanisms,
+                    lambda_value,
+                    init_B=init_B,
+                    init_context_effects=init_context,
+                    init_tau=init_tau,
+                    fixed_context_effects=fixed_context_effects,
+                    fixed_context_effect_se=fixed_context_effect_se,
+                    progress_label=f"cv-fold={fold}",
+                    prepared_blocks=train_blocks,
+                    **kwargs,
+                )
+                fold_scores[lambda_value].append(
+                    _evaluate_fit_mse(
+                        prepared_blocks,
+                        B,
+                        tau,
+                        kwargs.get("device", "cpu"),
+                        kwargs.get("ld_chunk_nnz"),
+                        fold=fold,
+                        context_effects=context_effects,
+                    )
+                )
+                init_B = B
+                init_context = context_effects
+                init_tau = tau
+            fold_states[fold] = (init_B, init_context, init_tau)
+            del train_blocks
+        cv_scores = {value: float(np.mean(scores)) for value, scores in fold_scores.items()}
+        extensions = 0
+        while (
+            extensions < max_lambda_extensions
+            and min(cv_scores, key=cv_scores.get) == min(cv_scores)
+        ):
+            next_lambda = min(cv_scores) / lambda_extension_factor
+            extension_scores = []
+            for fold in cv_folds:
+                train_blocks = []
+                for block in prepared_blocks:
+                    block_groups = block["cv_groups"]
+                    train_weight = block["weight"] * block_groups.ne(fold).to(block["weight"].dtype)
+                    train_blocks.append({**block, "weight": train_weight})
+                init_B, init_context, init_tau = fold_states[fold]
+                B, context_effects, _, tau, _, _ = fit_hierarchical_nuclear(
+                    dataset,
+                    n_genes,
+                    n_mechanisms,
+                    next_lambda,
+                    init_B=init_B,
+                    init_context_effects=init_context,
+                    init_tau=init_tau,
+                    fixed_context_effects=fixed_context_effects,
+                    fixed_context_effect_se=fixed_context_effect_se,
+                    progress_label=f"cv-fold={fold}",
+                    prepared_blocks=train_blocks,
+                    **kwargs,
+                )
+                extension_scores.append(
+                    _evaluate_fit_mse(
+                        prepared_blocks,
+                        B,
+                        tau,
+                        kwargs.get("device", "cpu"),
+                        kwargs.get("ld_chunk_nnz"),
+                        fold=fold,
+                        context_effects=context_effects,
+                    )
+                )
+                fold_states[fold] = (B, context_effects, tau)
+                del train_blocks
+            cv_scores[next_lambda] = float(np.mean(extension_scores))
+            ordered.append(next_lambda)
+            ordered.sort(reverse=True)
+            extensions += 1
+    best = min(cv_scores, key=cv_scores.get) if cv_scores else ordered[-1]
+    metadata = {
+        "cv_method": "ld_component" if cv else None,
+        "cv_folds": cv_folds,
+        "context_update": "joint_nonnegative_weighted_least_squares",
+        "lambda_extensions": max(0, len(ordered) - len({float(value) for value in lambdas})),
+        "lambda_extension_factor": lambda_extension_factor,
+    }
+    init_B = None
+    init_context = None
+    init_tau = 1e-8
+    losses_all: list[float] = []
+    B = None
+    context_effects = None
+    context_effect_se = None
+    tau = init_tau
+    for lambda_value in ordered:
+        B, context_effects, context_effect_se, tau, losses, fit_metadata = fit_hierarchical_nuclear(
+            dataset,
+            n_genes,
+            n_mechanisms,
+            lambda_value,
+            init_B=init_B,
+            init_context_effects=init_context,
+            init_tau=init_tau,
+            fixed_context_effects=fixed_context_effects,
+            fixed_context_effect_se=fixed_context_effect_se,
+            progress_label="full",
+            prepared_blocks=prepared_blocks,
+            **kwargs,
+        )
+        losses_all.extend(losses)
+        metadata[lambda_value] = fit_metadata
+        init_B = B
+        init_context = context_effects
+        init_tau = tau
+        if lambda_value == best:
+            break
+    assert B is not None and context_effects is not None and context_effect_se is not None
+    return FitResult(
+        "hierarchical",
+        ordered,
+        cv_scores,
+        float(best),
+        B,
+        tau,
+        losses_all,
+        metadata,
+        context_effects=context_effects,
+        context_effect_se=context_effect_se,
+    )
 
 
 def fit_rank1_path(

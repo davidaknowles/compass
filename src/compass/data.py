@@ -6,6 +6,7 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 
 
 CELLTYPE_NAMES = {
@@ -312,6 +313,36 @@ def _positions_in_bed_intervals(
     result = np.zeros(positions.size, dtype=bool)
     result[valid] = positions[valid] <= max_ends[previous[valid]]
     return result
+
+
+def load_peak_context_annotations(
+    peak_files: dict[str, str | Path],
+    chrom: np.ndarray,
+    position: np.ndarray,
+    mechanisms: list[str],
+) -> sp.csr_matrix:
+    """Build flat binary peak annotations aligned to an existing variant universe."""
+
+    chrom = np.asarray(chrom, dtype=np.int64)
+    position = np.asarray(position, dtype=np.int64)
+    if chrom.shape != position.shape:
+        raise ValueError("chrom and position must have the same shape")
+    unknown = set(peak_files).difference(mechanisms)
+    if unknown:
+        raise ValueError(f"Peak contexts are absent from mechanisms: {sorted(unknown)}")
+    intervals = {name: _read_bed_intervals(path) for name, path in peak_files.items()}
+    values = np.zeros((chrom.size, len(mechanisms)), dtype=np.float32)
+    for mechanism, by_chromosome in intervals.items():
+        column = mechanisms.index(mechanism)
+        for chromosome in range(1, 23):
+            rows = np.flatnonzero(chrom == chromosome)
+            values[rows, column] = _positions_in_bed_intervals(
+                position[rows], by_chromosome.get(chromosome)
+            )
+    if "intercept" in mechanisms:
+        context_columns = [mechanisms.index(name) for name in peak_files]
+        values[:, mechanisms.index("intercept")] = values[:, context_columns].max(axis=1)
+    return sp.csr_matrix(values)
 
 
 def load_open_chromatin_tss_annotations(

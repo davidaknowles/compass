@@ -18,6 +18,7 @@ from compass.data import (
     load_abc_annotations,
     load_gwas_sumstats,
     load_open_chromatin_tss_annotations,
+    load_peak_context_annotations,
     load_top_assoc_annotations,
     make_training_table,
 )
@@ -27,7 +28,14 @@ from compass.ld import (
     filter_variants_to_ukbb_ld,
     make_ld_component_cv_groups,
 )
-from compass.model import CompassDataset, LdChromosomeBlock, fit_nuclear_norm_path, fit_rank1_path
+from compass.model import (
+    CompassDataset,
+    LdChromosomeBlock,
+    aggregate_context_annotations,
+    fit_hierarchical_nuclear_path,
+    fit_nuclear_norm_path,
+    fit_rank1_path,
+)
 
 
 DEFAULT_DATA_ROOT = Path.home() / "knowles_lab" / "data" / "compass"
@@ -49,11 +57,25 @@ ABC_CONTEXT_PANELS = {
     "ad_proximal": DEFAULT_ABC_CELL_TYPES,
     "ad_with_controls": f"{DEFAULT_ABC_CELL_TYPES},{CONTROL_ABC_CELL_TYPES}",
 }
-OPEN_CHROMATIN_PEAK_FILES = {
-    "astrocyte": ("ATAC", "LHX2_optimal_peak_IDR_ENCODE.ATAC.bed"),
-    "microglia": ("ATAC", "PU1_optimal_peak_IDR_ENCODE.ATAC.bed"),
-    "neuron": ("ATAC", "NeuN_optimal_peak_IDR_ENCODE.ATAC.bed"),
-    "oligodendrocyte": ("ATAC", "Olig2_optimal_peak_IDR_ENCODE.ATAC.bed"),
+PEAK_ASSAY_FILES = {
+    "ATAC": {
+        "astrocyte": "LHX2_optimal_peak_IDR_ENCODE.ATAC.bed",
+        "microglia": "PU1_optimal_peak_IDR_ENCODE.ATAC.bed",
+        "neuron": "NeuN_optimal_peak_IDR_ENCODE.ATAC.bed",
+        "oligodendrocyte": "Olig2_optimal_peak_IDR_ENCODE.ATAC.bed",
+    },
+    "H3K27ac": {
+        "astrocyte": "LHX2_optimal_peak.H3K27.bed",
+        "microglia": "PU1_optimal_peak.H3K27.bed",
+        "neuron": "NeuN_optimal_peak.H3K27.bed",
+        "oligodendrocyte": "Olig2_optimal_peak.H3K27.bed",
+    },
+    "H3K4me3": {
+        "astrocyte": "LHX2_optimal_peak.H3K4me3.bed",
+        "microglia": "PU1_optimal_peak.H3K4me3.bed",
+        "neuron": "NeuN_optimal_peak.H3K4me3.bed",
+        "oligodendrocyte": "Olig2_optimal_peak.H3K4me3.bed",
+    },
 }
 
 
@@ -104,9 +126,15 @@ def _cache_key(
             f"r2ge{args.ld_r2_cutoff:g}.chromfp16.{cell_types}.{annotation_path}"
         )
     elif args.annotation_source == "open_chromatin":
-        source_paths = f"{open_chromatin_tss_path.resolve()}|{open_chromatin_peaks_root.resolve()}"
+        source_paths = (
+            f"{open_chromatin_tss_path.resolve()}|{open_chromatin_peaks_root.resolve()}|{args.peak_assay}"
+        )
         source_hash = hashlib.sha1(source_paths.encode("utf-8")).hexdigest()[:12]
-        source = f"openchromatin.tsswin{args.open_chromatin_tss_window:g}.{source_hash}"
+        context_suffix = ".flatctx" if getattr(args, "context_annotation_source", "gene_aggregate") == "peak" else ""
+        source = (
+            f"peaktss.{args.peak_assay}.tsswin{args.open_chromatin_tss_window:g}."
+            f"{source_hash}{context_suffix}"
+        )
     else:
         source = f"topassoc.{args.annotation_value}"
     return f"{source}.{intercept}.{gwas_path.name}.{n_samples}"
@@ -332,6 +360,7 @@ def _load_dataset_cache(paths: dict[str, Path]):
         chisq=arrays["chisq"],
         chrom=arrays["chrom"],
         n_samples=arrays["n_samples"],
+        position=arrays["position"] if "position" in arrays and arrays["position"].size else None,
         R2=R2,
         ld_blocks=ld_blocks,
         cv_groups=arrays["cv_groups"] if "cv_groups" in arrays and np.any(arrays["cv_groups"] >= 0) else None,
@@ -403,6 +432,11 @@ def _write_dataset_cache(
             paths["arrays"],
             chisq=dataset.chisq,
             chrom=dataset.chrom,
+            position=(
+                np.asarray(dataset.position, dtype=np.int64)
+                if dataset.position is not None
+                else np.asarray([], dtype=np.int64)
+            ),
             cv_groups=(
                 np.asarray(dataset.cv_groups, dtype=np.int64)
                 if dataset.cv_groups is not None
@@ -438,6 +472,31 @@ def _load_initial_B(path: str | Path, genes: pd.DataFrame, mechanisms: list[str]
     )
 
 
+def _load_context_effects(
+    path: str | Path, mechanisms: list[str]
+) -> tuple[np.ndarray, np.ndarray]:
+    frame = pd.read_csv(Path(path).expanduser(), sep="\t")
+    required = {"context", "effect"}
+    if not required.issubset(frame.columns):
+        raise ValueError(f"Context effect table requires columns: {sorted(required)}")
+    if frame["context"].duplicated().any():
+        raise ValueError("Context effect names must be unique")
+    indexed = frame.set_index(frame["context"].astype(str))
+    missing = set(mechanisms).difference(indexed.index)
+    if missing:
+        raise ValueError(f"Context effect table is missing mechanisms: {sorted(missing)}")
+    effects = pd.to_numeric(indexed.reindex(mechanisms)["effect"], errors="raise").to_numpy(np.float32)
+    if np.any(effects < 0):
+        raise ValueError("Fixed context effects must be non-negative")
+    if "standard_error" in indexed:
+        standard_errors = pd.to_numeric(
+            indexed.reindex(mechanisms)["standard_error"], errors="coerce"
+        ).to_numpy(np.float32)
+    else:
+        standard_errors = np.full(len(mechanisms), np.nan, dtype=np.float32)
+    return effects, standard_errors
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run genome-wide COMPASS with UKBB LD.")
     parser.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
@@ -451,6 +510,7 @@ def main() -> None:
     parser.add_argument("--open-chromatin-tss", default=None)
     parser.add_argument("--open-chromatin-peaks-root", default=None)
     parser.add_argument("--open-chromatin-tss-window", type=int, default=100_000)
+    parser.add_argument("--peak-assay", default="ATAC", choices=sorted(PEAK_ASSAY_FILES))
     parser.add_argument("--cv-folds", type=int, default=10)
     parser.add_argument("--cv-r2-threshold", type=float, default=0.01)
     parser.add_argument("--gwas", default=None)
@@ -471,7 +531,20 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-8)
     parser.add_argument("--tol", type=float, default=1e-2)
     parser.add_argument("--no-cv", action="store_true")
-    parser.add_argument("--method", default="nuclear", choices=["nuclear", "rank1"])
+    parser.add_argument("--method", default="nuclear", choices=["nuclear", "hierarchical", "rank1"])
+    parser.add_argument("--context-annotation", default="binary", choices=["binary", "sum"])
+    parser.add_argument(
+        "--context-annotation-source",
+        default="gene_aggregate",
+        choices=["gene_aggregate", "peak"],
+    )
+    parser.add_argument("--context-effects-tsv", default=None)
+    parser.add_argument(
+        "--regression-weighting",
+        default="auto",
+        choices=["auto", "uniform", "observed_chisq"],
+        help="auto preserves legacy weights except for the response-independent hierarchical fit",
+    )
     parser.add_argument("--init-b-tsv", default=None)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--model-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
@@ -504,6 +577,8 @@ def main() -> None:
         parser.error("--open-chromatin-tss-window must be non-negative")
     if args.method == "rank1" and args.init_b_tsv is None:
         parser.error("--method rank1 requires --init-b-tsv")
+    if args.context_effects_tsv is not None and args.method != "hierarchical":
+        parser.error("--context-effects-tsv requires --method hierarchical")
 
     data_root = Path(args.data_root).expanduser()
     top_assoc_dir = Path(args.top_assoc_dir).expanduser() if args.top_assoc_dir else data_root / "raw" / "zenodo_top_assoc"
@@ -518,6 +593,12 @@ def main() -> None:
         if args.open_chromatin_peaks_root
         else data_root / "raw" / "brain-cell-type-peak-files"
     )
+    peak_files = {
+        cell_type: open_chromatin_peaks_root / args.peak_assay / filename
+        for cell_type, filename in PEAK_ASSAY_FILES[args.peak_assay].items()
+    }
+    if args.context_annotation_source == "peak" and args.annotation_source != "open_chromatin":
+        parser.error("--context-annotation-source peak requires --annotation-source open_chromatin")
     gwas_path = Path(args.gwas).expanduser() if args.gwas else data_root / "raw" / "ad_gwas_2026" / "GCST90704647.hg19.tsv.gz"
     ld_dir = Path(args.ld_dir).expanduser() if args.ld_dir else data_root / "raw" / "ukbb_ld"
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else data_root / "results"
@@ -555,10 +636,6 @@ def main() -> None:
                     add_intercept=not args.no_intercept,
                 )
             elif args.annotation_source == "open_chromatin":
-                peak_files = {
-                    cell_type: open_chromatin_peaks_root / directory / filename
-                    for cell_type, (directory, filename) in OPEN_CHROMATIN_PEAK_FILES.items()
-                }
                 missing_peak_files = [str(path) for path in peak_files.values() if not path.is_file()]
                 if missing_peak_files:
                     raise FileNotFoundError(f"Missing ATAC peak files: {missing_peak_files}")
@@ -652,6 +729,7 @@ def main() -> None:
             chisq=training["chisq"].to_numpy(np.float32),
             chrom=variants["chrom"].to_numpy(np.int64),
             n_samples=n_samples,
+            position=variants["pos"].to_numpy(np.int64),
             ld_blocks=ld_blocks,
         )
         genes = ann.genes
@@ -671,6 +749,28 @@ def main() -> None:
             )
         dataset.cv_groups = cv_groups
         dataset.cv_score_groups = cv_score_groups
+
+    if args.method == "hierarchical":
+        weighting = "uniform" if args.regression_weighting == "auto" else args.regression_weighting
+        if weighting == "uniform":
+            dataset.sample_weight = np.ones(dataset.n_variants, dtype=np.float32)
+        with _timed(f"build {args.context_annotation} context annotations"):
+            if args.context_annotation_source == "peak":
+                if dataset.position is None:
+                    raise ValueError("Flat peak contexts require a cache with variant positions")
+                dataset.context_annotations = load_peak_context_annotations(
+                    peak_files,
+                    dataset.chrom,
+                    dataset.position,
+                    mechanisms,
+                )
+            else:
+                dataset.context_annotations = aggregate_context_annotations(
+                    dataset.A,
+                    genes.shape[0],
+                    len(mechanisms),
+                    mode=args.context_annotation,
+                )
 
     if not _dataset_cache_exists(paths):
         _write_dataset_cache(
@@ -724,6 +824,35 @@ def main() -> None:
                 svd_n_iter=args.svd_n_iter,
                 ld_chunk_nnz=args.ld_chunk_nnz,
             )
+        elif args.method == "hierarchical":
+            fixed_context_effects = None
+            fixed_context_effect_se = None
+            if args.context_effects_tsv is not None:
+                fixed_context_effects, fixed_context_effect_se = _load_context_effects(
+                    args.context_effects_tsv, mechanisms
+                )
+            fit = fit_hierarchical_nuclear_path(
+                dataset,
+                n_genes=genes.shape[0],
+                n_mechanisms=len(mechanisms),
+                lambdas=args.lambdas,
+                cv=not args.no_cv,
+                fixed_context_effects=fixed_context_effects,
+                fixed_context_effect_se=fixed_context_effect_se,
+                max_lambda_extensions=args.max_lambda_extensions,
+                lambda_extension_factor=args.lambda_extension_factor,
+                lr=args.lr,
+                max_iter=args.max_iter,
+                progress_every=args.progress_every,
+                tol=args.tol,
+                device=device,
+                model_dtype=args.model_dtype,
+                svd_method=args.svd_method,
+                svd_rank=args.svd_rank,
+                svd_oversamples=args.svd_oversamples,
+                svd_n_iter=args.svd_n_iter,
+                ld_chunk_nnz=args.ld_chunk_nnz,
+            )
         else:
             fit = fit_rank1_path(
                 dataset,
@@ -746,18 +875,57 @@ def main() -> None:
     run_name = args.run_name or f"compass-{stamp}"
     prefix = out_dir / run_name
 
-    np.savez_compressed(
-        f"{prefix}.npz",
-        B=fit.B,
-        tau=np.asarray(fit.tau, dtype=np.float32),
-        losses=np.asarray(fit.losses, dtype=np.float32),
-        lambdas=np.asarray(fit.lambdas, dtype=np.float32),
-        best_lambda=np.asarray(fit.best_lambda, dtype=np.float32),
-    )
+    result_arrays = {
+        "B": fit.B,
+        "tau": np.asarray(fit.tau, dtype=np.float32),
+        "losses": np.asarray(fit.losses, dtype=np.float32),
+        "lambdas": np.asarray(fit.lambdas, dtype=np.float32),
+        "best_lambda": np.asarray(fit.best_lambda, dtype=np.float32),
+    }
+    if fit.context_effects is not None:
+        result_arrays["context_effects"] = fit.context_effects
+        result_arrays["context_effect_se"] = fit.context_effect_se
+    np.savez_compressed(f"{prefix}.npz", **result_arrays)
     pd.DataFrame(fit.B, index=genes["gene"], columns=mechanisms).to_csv(f"{prefix}.B.tsv", sep="\t")
+    if fit.context_effects is not None:
+        context_counts = np.asarray(dataset.context_annotations.sum(axis=0)).ravel()
+        pd.DataFrame(
+            {
+                "context": mechanisms,
+                "effect": fit.context_effects,
+                "standard_error": fit.context_effect_se,
+                "z": np.divide(
+                    fit.context_effects,
+                    fit.context_effect_se,
+                    out=np.zeros_like(fit.context_effects),
+                    where=fit.context_effect_se > 0,
+                ),
+                "annotation_count": context_counts,
+                "implied_h2": fit.context_effects * context_counts,
+            }
+        ).to_csv(f"{prefix}.context_effects.tsv", sep="\t", index=False)
     ld_diagnostics.to_csv(f"{prefix}.ld_diagnostics.tsv", sep="\t", index=False)
     metadata = {
         "method": fit.method,
+        "context_annotation": args.context_annotation if args.method == "hierarchical" else None,
+        "context_annotation_source": (
+            args.context_annotation_source if args.method == "hierarchical" else None
+        ),
+        "context_effects": fit.context_effects,
+        "context_effect_se": fit.context_effect_se,
+        "context_effects_tsv": (
+            str(Path(args.context_effects_tsv).expanduser()) if args.context_effects_tsv else None
+        ),
+        "context_annotation_counts": (
+            np.asarray(dataset.context_annotations.sum(axis=0)).ravel()
+            if fit.context_effects is not None
+            else None
+        ),
+        "regression_weighting": (
+            "uniform"
+            if args.method == "hierarchical" and args.regression_weighting == "auto"
+            else args.regression_weighting
+        ),
         "init_b_tsv": str(Path(args.init_b_tsv).expanduser()) if args.init_b_tsv else None,
         "best_lambda": fit.best_lambda,
         "cv_scores": fit.cv_scores,
@@ -793,6 +961,7 @@ def main() -> None:
         "open_chromatin_tss_window": (
             args.open_chromatin_tss_window if args.annotation_source == "open_chromatin" else None
         ),
+        "peak_assay": args.peak_assay if args.annotation_source == "open_chromatin" else None,
         "cv_folds": args.cv_folds if not args.no_cv else None,
         "cv_r2_threshold": args.cv_r2_threshold if not args.no_cv else None,
     }

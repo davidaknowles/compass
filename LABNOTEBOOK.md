@@ -1,5 +1,13 @@
 # LAB NOTEBOOK
 
+## 2026-07-20 hierarchical context effects
+
+- The original nuclear penalty acts on the complete gene-by-context matrix and therefore shrinks both context-wide and gene-specific effects. Added a hierarchical decomposition with an unpenalized global context layer and a non-negative nuclear-regularized gene-deviation matrix. At large deviation penalty, the model reduces to one shared coefficient per context, matching the gene-aggregated S-LDSC assumption.
+- The legacy `1 / observed chi-square` regression weight is response-dependent and drove the non-negative global coefficients to zero. Hierarchical fits now use response-independent uniform weights by default; legacy fits retain their previous weighting unless explicitly changed.
+- Global context effects are estimated jointly with the residual LD-score coefficient by non-negative weighted least squares. Chromosome leave-one-out estimates provide context standard errors. Binary gene-aggregated annotations and flat peak annotations are both supported.
+- In unadjusted high-penalty pilots, flat H3K27ac context effects prioritized neurons for SCZ 2026. For AD 2026, the microglial coefficient matched the BaselineLD S-LDSC magnitude, but neuronal and oligodendrocyte coefficients remained spuriously positive. This isolates BaselineLD nuisance adjustment as necessary for AD context specificity.
+- Added a calibrated two-stage form of the hierarchical model: official BaselineLD-adjusted S-LDSC estimates the unpenalized global context effects, and COMPASS fits gene-specific deviations conditional on those effects. Negative S-LDSC coefficients are clipped to zero because global context effects represent non-negative heritability contributions. Full LD-component-CV deviation fits for AD and SCZ are pending.
+
 ## 2026-07-17 AD GWAS correction
 
 - All AD analyses completed before this entry used the Jansen et al. 2019 summary statistics and must not be described as analyses of the 2026 consensus GWAS.

@@ -4,12 +4,31 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
-from compass.data import load_open_chromatin_tss_annotations
+from compass.data import load_open_chromatin_tss_annotations, load_peak_context_annotations
 
 
 class OpenChromatinTssAnnotationTest(unittest.TestCase):
+    def test_flat_peak_context_annotations_include_union_nuisance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            astrocyte = root / "astrocyte.bed"
+            microglia = root / "microglia.bed"
+            astrocyte.write_text("chr1\t90\t110\n")
+            microglia.write_text("chr1\t190\t210\n")
+            matrix = load_peak_context_annotations(
+                {"astrocyte": astrocyte, "microglia": microglia},
+                np.array([1, 1, 1]),
+                np.array([100, 200, 300]),
+                ["intercept", "astrocyte", "microglia"],
+            )
+        np.testing.assert_array_equal(
+            matrix.toarray(),
+            [[1.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 0.0]],
+        )
+
     def test_links_peak_variants_to_expressed_nearby_tss(self):
         gwas = pd.DataFrame(
             {
