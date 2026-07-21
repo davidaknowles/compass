@@ -826,6 +826,7 @@ def fit_hierarchical_nuclear(
     adaptive_step: bool = True,
     step_backoff: float = 0.5,
     step_increase_tolerance: float = 1e-5,
+    step_backtrack_patience: int = 5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, list[float], dict]:
     """Fit unpenalized context effects plus nuclear-penalized gene deviations."""
 
@@ -837,6 +838,8 @@ def fit_hierarchical_nuclear(
         raise ValueError("step_backoff must be in (0, 1)")
     if step_increase_tolerance < 0:
         raise ValueError("step_increase_tolerance must be non-negative")
+    if step_backtrack_patience < 1:
+        raise ValueError("step_backtrack_patience must be positive")
     train_dtype = _torch_dtype(model_dtype)
     block_specs = _prepare_fit_blocks(dataset, device) if prepared_blocks is None else prepared_blocks
     total_den = int(sum(int(torch.count_nonzero(block["weight"]).item()) for block in block_specs))
@@ -888,11 +891,8 @@ def fit_hierarchical_nuclear(
     convergence_reason = "max_iterations"
     effective_lr = float(lr)
     minimum_lr = float(lr) / 128.0
-    accepted_objective = np.inf
-    accepted_B = B.detach().clone()
-    accepted_context = context_effects.detach().clone()
-    accepted_tau = tau.detach().clone()
     step_backtracks = 0
+    uphill_streak = 0
     evaluations = 0
     for it in range(max_iter):
         evaluations += 1
@@ -918,33 +918,8 @@ def fit_hierarchical_nuclear(
             lambda_value * torch.linalg.matrix_norm(B.float(), ord="nuc").detach().cpu()
         )
         objective = data_loss + regularization
-        objective_increased = (
-            adaptive_step
-            and np.isfinite(accepted_objective)
-            and objective
-            > accepted_objective
-            + step_increase_tolerance * max(abs(accepted_objective), 1.0)
-        )
-        if objective_increased and effective_lr > minimum_lr:
-            with torch.no_grad():
-                B.copy_(accepted_B)
-                context_effects.copy_(accepted_context)
-                tau.copy_(accepted_tau)
-            effective_lr = max(minimum_lr, effective_lr * step_backoff)
-            step_backtracks += 1
-            if progress_every:
-                print(
-                    f"[fit] {progress_label} lambda={lambda_value:g} iteration={it + 1} "
-                    f"objective={objective:.6g} backtrack_lr={effective_lr:.3g}",
-                    flush=True,
-                )
-            continue
-
-        accepted_objective = objective
-        accepted_B = B.detach().clone()
-        accepted_context = context_next.detach().clone()
-        accepted_tau = tau_next.detach().clone()
-        if np.isfinite(objective) and objective < best_objective - objective_improve_tol:
+        improved = np.isfinite(objective) and objective < best_objective - objective_improve_tol
+        if improved:
             best_objective = objective
             best_B = B.detach().clone()
             best_context_effects = context_next.detach().clone()
@@ -960,8 +935,38 @@ def fit_hierarchical_nuclear(
                 )
             best_tau = tau_next.detach().clone()
             stalled_iterations = 0
+            uphill_streak = 0
         else:
             stalled_iterations += 1
+            if (
+                np.isfinite(objective)
+                and np.isfinite(best_objective)
+                and objective
+                > best_objective
+                + step_increase_tolerance * max(abs(best_objective), 1.0)
+            ):
+                uphill_streak += 1
+            else:
+                uphill_streak = 0
+        if (
+            adaptive_step
+            and uphill_streak >= step_backtrack_patience
+            and effective_lr > minimum_lr
+        ):
+            with torch.no_grad():
+                B.copy_(best_B)
+                context_effects.copy_(best_context_effects)
+                tau.copy_(best_tau)
+            effective_lr = max(minimum_lr, effective_lr * step_backoff)
+            step_backtracks += 1
+            uphill_streak = 0
+            if progress_every:
+                print(
+                    f"[fit] {progress_label} lambda={lambda_value:g} iteration={it + 1} "
+                    f"objective={objective:.6g} backtrack_lr={effective_lr:.3g}",
+                    flush=True,
+                )
+            continue
         with torch.no_grad():
             b_grad = torch.nan_to_num(B.grad, nan=0.0, posinf=0.0, neginf=0.0)
             if grad_clip is not None:
@@ -1028,6 +1033,7 @@ def fit_hierarchical_nuclear(
         "initial_lr": float(lr),
         "effective_lr": effective_lr,
         "step_backtracks": step_backtracks,
+        "step_backtrack_patience": step_backtrack_patience,
         "best_objective": best_objective,
         "context_update": "joint_nonnegative_weighted_least_squares",
         "context_effects_fixed": fixed_context_effects is not None and not scale_fixed_context_effects,

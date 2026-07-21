@@ -105,6 +105,7 @@ class HierarchicalModelTest(unittest.TestCase):
             lambda_value=0.01,
             lr=0.1,
             max_iter=20,
+            step_backtrack_patience=1,
             device="cpu",
         )
         self.assertGreaterEqual(adaptive_metadata["step_backtracks"], 1)
