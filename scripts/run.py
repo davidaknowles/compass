@@ -15,12 +15,15 @@ import pandas as pd
 import scipy.sparse as sp
 
 from compass.data import (
+    cv_cache_path,
     load_abc_annotations,
+    load_cv_cache,
     load_gwas_sumstats,
     load_open_chromatin_tss_annotations,
     load_peak_context_annotations,
     load_top_assoc_annotations,
     make_training_table,
+    write_cv_cache,
 )
 from compass.ld import (
     annotation_triples_to_csr,
@@ -761,14 +764,22 @@ def main() -> None:
     if not args.no_cv:
         if dataset.ld_blocks is None:
             raise ValueError("LD-component CV requires chromosome-level LD blocks")
-        with _timed("build global LD-component CV folds"):
-            cv_groups, cv_score_groups, cv_metadata = make_ld_component_cv_groups(
-                dataset.ld_blocks,
-                dataset.A,
-                len(mechanisms),
-                n_folds=args.cv_folds,
-                r2_threshold=args.cv_r2_threshold,
-            )
+        cv_cache = cv_cache_path(paths["arrays"], args.cv_folds, args.cv_r2_threshold)
+        cached_cv = None if args.rebuild_cache else load_cv_cache(cv_cache, dataset.n_variants)
+        if cached_cv is None:
+            with _timed("build global LD-component CV folds"):
+                cv_groups, cv_score_groups, cv_metadata = make_ld_component_cv_groups(
+                    dataset.ld_blocks,
+                    dataset.A,
+                    len(mechanisms),
+                    n_folds=args.cv_folds,
+                    r2_threshold=args.cv_r2_threshold,
+                )
+            with _timed("write LD-component CV cache"):
+                write_cv_cache(cv_cache, cv_groups, cv_score_groups, cv_metadata)
+        else:
+            with _timed("load LD-component CV cache"):
+                cv_groups, cv_score_groups, cv_metadata = cached_cv
         dataset.cv_groups = cv_groups
         dataset.cv_score_groups = cv_score_groups
 

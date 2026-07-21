@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -18,6 +20,50 @@ CELLTYPE_NAMES = {
     "OD": "oligodendrocyte",
     "OPC": "opc",
 }
+
+
+def cv_cache_path(arrays_path: str | Path, n_folds: int, r2_threshold: float) -> Path:
+    """Return the deterministic sidecar path for LD-component fold assignments."""
+
+    return Path(f"{Path(arrays_path)}.cv{n_folds}.r2ge{r2_threshold:g}.npz")
+
+
+def load_cv_cache(path: str | Path, n_variants: int) -> tuple[np.ndarray, np.ndarray, dict] | None:
+    """Load a validated LD-component fold cache, or return None if unusable."""
+
+    cache_path = Path(path)
+    if not cache_path.exists():
+        return None
+    try:
+        with np.load(cache_path, allow_pickle=False) as archive:
+            groups = archive["cv_groups"].astype(np.int64, copy=True)
+            score_groups = archive["cv_score_groups"].astype(np.int64, copy=True)
+            metadata = json.loads(str(archive["metadata_json"].item()))
+    except (KeyError, OSError, ValueError, json.JSONDecodeError):
+        return None
+    if groups.shape != (n_variants,) or score_groups.shape != (n_variants,):
+        return None
+    return groups, score_groups, metadata
+
+
+def write_cv_cache(
+    path: str | Path,
+    cv_groups: np.ndarray,
+    cv_score_groups: np.ndarray,
+    metadata: dict,
+) -> None:
+    """Atomically persist LD-component fold assignments and diagnostics."""
+
+    cache_path = Path(path)
+    temporary = cache_path.with_name(f".{cache_path.name}.tmp-{os.getpid()}")
+    with temporary.open("wb") as handle:
+        np.savez_compressed(
+            handle,
+            cv_groups=np.asarray(cv_groups, dtype=np.int64),
+            cv_score_groups=np.asarray(cv_score_groups, dtype=np.int64),
+            metadata_json=np.asarray(json.dumps(metadata, sort_keys=True)),
+        )
+    os.replace(temporary, cache_path)
 
 
 @dataclass(frozen=True)
