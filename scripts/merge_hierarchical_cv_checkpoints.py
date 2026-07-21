@@ -16,12 +16,39 @@ def _load(path: Path) -> dict[str, np.ndarray]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", type=Path, required=True)
+    parser.add_argument("--base", type=Path, default=None)
     parser.add_argument("--shard", type=Path, action="append", default=[])
+    parser.add_argument(
+        "--folds",
+        default=None,
+        help="Comma-separated target folds when constructing a checkpoint only from shards",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    merged = _load(args.base)
+    if args.base is None:
+        if not args.shard or args.folds is None:
+            parser.error("omit --base only when --shard and --folds are provided")
+        target_folds = sorted({int(value) for value in args.folds.split(",")})
+        template = _load(args.shard[0])
+        merged = {key: value.copy() for key, value in template.items()}
+        merged["folds"] = np.asarray(target_folds, dtype=np.int64)
+        merged["B"] = np.zeros((len(target_folds), *template["B"].shape[1:]), dtype=template["B"].dtype)
+        merged["context_effects"] = np.zeros(
+            (len(target_folds), template["context_effects"].shape[1]),
+            dtype=template["context_effects"].dtype,
+        )
+        merged["tau"] = np.full(len(target_folds), 1e-8, dtype=template["tau"].dtype)
+        merged["scores"] = np.full(
+            (len(target_folds), template["scores"].shape[1]),
+            np.nan,
+            dtype=template["scores"].dtype,
+        )
+        merged["next_lambda_index"] = np.zeros(len(target_folds), dtype=np.int64)
+    else:
+        if args.folds is not None:
+            parser.error("--folds is only valid when --base is omitted")
+        merged = _load(args.base)
     folds = np.asarray(merged["folds"], dtype=np.int64)
     fold_to_row = {int(fold): row for row, fold in enumerate(folds)}
     contract_fields = (
