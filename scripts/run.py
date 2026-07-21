@@ -536,7 +536,7 @@ def main() -> None:
         "--lr",
         type=float,
         default=None,
-        help="Proximal step size (default: 1e-7 hierarchical, 1e-8 otherwise)",
+        help="Initial proximal step size (default: 3e-7 hierarchical, 1e-8 otherwise)",
     )
     parser.add_argument("--tol", type=float, default=1e-2)
     parser.add_argument("--objective-relative-tol", type=float, default=1e-5)
@@ -605,7 +605,7 @@ def main() -> None:
     if args.context_effects_tsv is not None and args.method != "hierarchical":
         parser.error("--context-effects-tsv requires --method hierarchical")
     if args.lr is None:
-        args.lr = 1e-7 if args.method == "hierarchical" else 1e-8
+        args.lr = 3e-7 if args.method == "hierarchical" else 1e-8
     if args.lr <= 0:
         parser.error("--lr must be positive")
 

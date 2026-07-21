@@ -98,6 +98,18 @@ class HierarchicalModelTest(unittest.TestCase):
         np.testing.assert_allclose(context_se, 0.0, atol=1e-8)
         np.testing.assert_allclose(deviations, 0.0, atol=1e-8)
 
+        _, _, _, _, adaptive_losses, adaptive_metadata = fit_hierarchical_nuclear(
+            dataset,
+            n_genes,
+            n_mechanisms,
+            lambda_value=0.01,
+            lr=0.1,
+            max_iter=20,
+            device="cpu",
+        )
+        self.assertGreaterEqual(adaptive_metadata["step_backtracks"], 1)
+        self.assertTrue(np.all(np.diff(adaptive_losses) <= 1e-5))
+
         fixed = np.array([0.01, 0.09], dtype=np.float32)
         _, fixed_effects, fixed_se, _, _, metadata = fit_hierarchical_nuclear(
             dataset,
