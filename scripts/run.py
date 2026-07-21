@@ -550,7 +550,9 @@ def main() -> None:
     )
     parser.add_argument("--context-effects-tsv", default=None)
     parser.add_argument(
-        "--context-effects-mode", default="scaled", choices=["fixed", "scaled"]
+        "--context-effects-mode",
+        default="scaled_frozen",
+        choices=["fixed", "scaled", "scaled_frozen"],
     )
     parser.add_argument(
         "--regression-weighting",
@@ -873,8 +875,10 @@ def main() -> None:
                 fixed_context_effects=fixed_context_effects,
                 fixed_context_effect_se=fixed_context_effect_se,
                 scale_fixed_context_effects=(
-                    fixed_context_effects is not None and args.context_effects_mode == "scaled"
+                    fixed_context_effects is not None
+                    and args.context_effects_mode in {"scaled", "scaled_frozen"}
                 ),
+                freeze_scaled_context_effects=(args.context_effects_mode == "scaled_frozen"),
                 cv_checkpoint_path=cv_checkpoint_path if not args.no_cv else None,
                 max_lambda_extensions=args.max_lambda_extensions,
                 lambda_extension_factor=args.lambda_extension_factor,

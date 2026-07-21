@@ -146,6 +146,26 @@ class HierarchicalModelTest(unittest.TestCase):
         self.assertLess(len(objective_losses), 40)
         self.assertEqual(objective_metadata["convergence_reason"], "relative_objective")
 
+        frozen_path = fit_hierarchical_nuclear_path(
+            dataset,
+            n_genes,
+            n_mechanisms,
+            lambdas=[1_000.0, 0.1],
+            cv=False,
+            fixed_context_effects=profile,
+            fixed_context_effect_se=np.zeros(2, dtype=np.float32),
+            scale_fixed_context_effects=True,
+            freeze_scaled_context_effects=True,
+            lr=1e-3,
+            max_iter=12,
+            device="cpu",
+        )
+        np.testing.assert_allclose(
+            frozen_path.context_effects, expected_context, rtol=1e-4, atol=1e-6
+        )
+        self.assertTrue(frozen_path.metadata["freeze_scaled_context_effects"])
+        self.assertTrue(frozen_path.metadata[0.1]["context_effects_fixed"])
+
         dataset.cv_groups = np.arange(n_variants) % 2
         dataset.cv_score_groups = dataset.cv_groups.copy()
         with TemporaryDirectory() as temporary_directory:
@@ -158,6 +178,7 @@ class HierarchicalModelTest(unittest.TestCase):
                 fixed_context_effects=profile,
                 fixed_context_effect_se=np.zeros(2, dtype=np.float32),
                 scale_fixed_context_effects=True,
+                freeze_scaled_context_effects=True,
                 cv_checkpoint_path=checkpoint,
                 max_lambda_extensions=0,
                 lr=1e-3,
@@ -169,6 +190,7 @@ class HierarchicalModelTest(unittest.TestCase):
             with np.load(checkpoint) as saved:
                 np.testing.assert_array_equal(saved["next_lambda_index"], [1, 1])
                 self.assertTrue(np.isfinite(saved["scores"]).all())
+                self.assertTrue(saved["freeze_scaled_context_effects"].item())
 
             resumed = fit_hierarchical_nuclear_path(
                 dataset,
@@ -178,6 +200,7 @@ class HierarchicalModelTest(unittest.TestCase):
                 fixed_context_effects=profile,
                 fixed_context_effect_se=np.zeros(2, dtype=np.float32),
                 scale_fixed_context_effects=True,
+                freeze_scaled_context_effects=True,
                 cv_checkpoint_path=checkpoint,
                 max_lambda_extensions=0,
                 lr=1e-3,
@@ -193,6 +216,7 @@ class HierarchicalModelTest(unittest.TestCase):
                     lambdas=[1000.0],
                     fixed_context_effects=profile[::-1].copy(),
                     scale_fixed_context_effects=True,
+                    freeze_scaled_context_effects=True,
                     cv_checkpoint_path=checkpoint,
                     max_lambda_extensions=0,
                     max_iter=12,

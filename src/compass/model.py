@@ -1378,6 +1378,7 @@ def _load_or_initialize_hierarchical_cv_checkpoint(
     n_mechanisms: int,
     fixed_context_effects: np.ndarray | None,
     scale_fixed_context_effects: bool,
+    freeze_scaled_context_effects: bool,
 ) -> dict[str, np.ndarray]:
     """Load compatible fold states or initialize an empty checkpoint."""
 
@@ -1401,6 +1402,7 @@ def _load_or_initialize_hierarchical_cv_checkpoint(
             "next_lambda_index",
             "fixed_context_effects",
             "scale_fixed_context_effects",
+            "freeze_scaled_context_effects",
         }
         missing = required.difference(checkpoint)
         if missing:
@@ -1418,6 +1420,8 @@ def _load_or_initialize_hierarchical_cv_checkpoint(
             and np.array_equal(checkpoint["fixed_context_effects"], profile)
             and bool(np.asarray(checkpoint["scale_fixed_context_effects"]).item())
             == bool(scale_fixed_context_effects)
+            and bool(np.asarray(checkpoint["freeze_scaled_context_effects"]).item())
+            == bool(freeze_scaled_context_effects)
         )
         if not compatible:
             raise ValueError(
@@ -1438,6 +1442,7 @@ def _load_or_initialize_hierarchical_cv_checkpoint(
         "next_lambda_index": np.zeros(len(cv_folds), dtype=np.int64),
         "fixed_context_effects": profile,
         "scale_fixed_context_effects": np.asarray(scale_fixed_context_effects, dtype=np.bool_),
+        "freeze_scaled_context_effects": np.asarray(freeze_scaled_context_effects, dtype=np.bool_),
     }
     _save_hierarchical_cv_checkpoint(checkpoint_path, checkpoint)
     return checkpoint
@@ -1452,6 +1457,7 @@ def fit_hierarchical_nuclear_path(
     fixed_context_effects: np.ndarray | None = None,
     fixed_context_effect_se: np.ndarray | None = None,
     scale_fixed_context_effects: bool = False,
+    freeze_scaled_context_effects: bool = False,
     cv_checkpoint_path: str | Path | None = None,
     max_lambda_extensions: int = 4,
     lambda_extension_factor: float = 3.0,
@@ -1481,6 +1487,7 @@ def fit_hierarchical_nuclear_path(
                 n_mechanisms,
                 fixed_context_effects,
                 scale_fixed_context_effects,
+                freeze_scaled_context_effects,
             )
             ordered = checkpoint["lambdas"].tolist()
         fold_scores: dict[float, list[float]] = {value: [] for value in ordered}
@@ -1517,6 +1524,11 @@ def fit_hierarchical_nuclear_path(
                 init_tau = 1e-8
             for lambda_index in range(start_index, len(ordered)):
                 lambda_value = ordered[lambda_index]
+                freeze_context = (
+                    freeze_scaled_context_effects
+                    and scale_fixed_context_effects
+                    and lambda_index > 0
+                )
                 B, context_effects, _, tau, _, _ = fit_hierarchical_nuclear(
                     dataset,
                     n_genes,
@@ -1525,9 +1537,9 @@ def fit_hierarchical_nuclear_path(
                     init_B=init_B,
                     init_context_effects=init_context,
                     init_tau=init_tau,
-                    fixed_context_effects=fixed_context_effects,
-                    fixed_context_effect_se=fixed_context_effect_se,
-                    scale_fixed_context_effects=scale_fixed_context_effects,
+                    fixed_context_effects=init_context if freeze_context else fixed_context_effects,
+                    fixed_context_effect_se=None if freeze_context else fixed_context_effect_se,
+                    scale_fixed_context_effects=scale_fixed_context_effects and not freeze_context,
                     progress_label=f"cv-fold={fold}",
                     prepared_blocks=train_blocks,
                     **kwargs,
@@ -1586,9 +1598,19 @@ def fit_hierarchical_nuclear_path(
                     init_B=init_B,
                     init_context_effects=init_context,
                     init_tau=init_tau,
-                    fixed_context_effects=fixed_context_effects,
-                    fixed_context_effect_se=fixed_context_effect_se,
-                    scale_fixed_context_effects=scale_fixed_context_effects,
+                    fixed_context_effects=(
+                        init_context
+                        if freeze_scaled_context_effects and scale_fixed_context_effects
+                        else fixed_context_effects
+                    ),
+                    fixed_context_effect_se=(
+                        None
+                        if freeze_scaled_context_effects and scale_fixed_context_effects
+                        else fixed_context_effect_se
+                    ),
+                    scale_fixed_context_effects=(
+                        scale_fixed_context_effects and not freeze_scaled_context_effects
+                    ),
                     progress_label=f"cv-fold={fold}",
                     prepared_blocks=train_blocks,
                     **kwargs,
@@ -1623,6 +1645,7 @@ def fit_hierarchical_nuclear_path(
         "cv_method": "ld_component" if cv else None,
         "cv_folds": cv_folds,
         "context_update": "joint_nonnegative_weighted_least_squares",
+        "freeze_scaled_context_effects": freeze_scaled_context_effects,
         "lambda_extensions": max(0, len(ordered) - len({float(value) for value in lambdas})),
         "lambda_extension_factor": lambda_extension_factor,
         "cv_checkpoint_path": str(cv_checkpoint_path) if cv_checkpoint_path is not None else None,
@@ -1634,8 +1657,14 @@ def fit_hierarchical_nuclear_path(
     B = None
     context_effects = None
     context_effect_se = None
+    frozen_context_effect_se = None
     tau = init_tau
     for lambda_value in ordered:
+        freeze_context = (
+            freeze_scaled_context_effects
+            and scale_fixed_context_effects
+            and init_context is not None
+        )
         B, context_effects, context_effect_se, tau, losses, fit_metadata = fit_hierarchical_nuclear(
             dataset,
             n_genes,
@@ -1644,9 +1673,11 @@ def fit_hierarchical_nuclear_path(
             init_B=init_B,
             init_context_effects=init_context,
             init_tau=init_tau,
-            fixed_context_effects=fixed_context_effects,
-            fixed_context_effect_se=fixed_context_effect_se,
-            scale_fixed_context_effects=scale_fixed_context_effects,
+            fixed_context_effects=init_context if freeze_context else fixed_context_effects,
+            fixed_context_effect_se=(
+                frozen_context_effect_se if freeze_context else fixed_context_effect_se
+            ),
+            scale_fixed_context_effects=scale_fixed_context_effects and not freeze_context,
             progress_label="full",
             prepared_blocks=prepared_blocks,
             **kwargs,
@@ -1656,6 +1687,8 @@ def fit_hierarchical_nuclear_path(
         init_B = B
         init_context = context_effects
         init_tau = tau
+        if frozen_context_effect_se is None:
+            frozen_context_effect_se = context_effect_se
         if lambda_value == best:
             break
     assert B is not None and context_effects is not None and context_effect_se is not None
