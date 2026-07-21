@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 import scipy.sparse as sp
+import torch
 
 from compass.model import (
     CompassDataset,
@@ -14,10 +15,42 @@ from compass.model import (
     context_heritability_components,
     fit_hierarchical_nuclear,
     fit_hierarchical_nuclear_path,
+    gene_deviation_heritability_from_masses,
+    nuclear_prox,
+    nuclear_prox_lower_bound,
 )
 
 
 class HierarchicalModelTest(unittest.TestCase):
+    def test_shifted_nuclear_prox_enforces_total_nonnegativity(self):
+        value = torch.tensor(
+            [[0.8, -0.7], [-0.5, 0.4], [0.2, -0.3]], dtype=torch.float32
+        )
+        lower = torch.tensor([[-0.2, -0.1]], dtype=torch.float32)
+        threshold = 0.35
+        result = nuclear_prox_lower_bound(value, threshold, lower, max_iter=200, tol=1e-8)
+        naive = torch.maximum(nuclear_prox(value, threshold), lower)
+
+        self.assertTrue(torch.all(result >= lower - 1e-6))
+        self.assertTrue(torch.any(result < 0))
+
+        def objective(candidate):
+            return 0.5 * torch.sum((candidate - value) ** 2) + threshold * torch.linalg.matrix_norm(
+                candidate, ord="nuc"
+            )
+
+        self.assertLessEqual(float(objective(result)), float(objective(naive)) + 1e-5)
+
+    def test_gene_deviation_heritability_from_masses(self):
+        mass = np.array([[2.0, 3.0], [4.0, 5.0]])
+        coefficients = np.array([[0.1, 0.2], [0.3, 0.4]])
+        np.testing.assert_allclose(
+            gene_deviation_heritability_from_masses(mass, coefficients),
+            [[0.2, 0.6], [1.2, 2.0]],
+        )
+        with self.assertRaisesRegex(ValueError, "matching gene-by-context"):
+            gene_deviation_heritability_from_masses(mass[:, :1], coefficients)
+
     def test_context_heritability_components_separates_global_and_deviation_terms(self):
         annotation = sp.csr_matrix(
             np.array(
@@ -52,6 +85,58 @@ class HierarchicalModelTest(unittest.TestCase):
         summed = aggregate_context_annotations(annotation, 2, 2, mode="sum")
         np.testing.assert_array_equal(binary.toarray(), [[1.0, 1.0], [0.0, 1.0]])
         np.testing.assert_allclose(summed.toarray(), [[0.5, 0.4], [0.0, 1.2]])
+
+    def test_signed_deviations_recover_downweights_with_nonnegative_totals(self):
+        n_genes = 2
+        n_contexts = 2
+        annotation = sp.vstack(
+            [
+                sp.eye(4, format="csr", dtype=np.float32),
+                sp.csr_matrix((4, 4), dtype=np.float32),
+            ],
+            format="csr",
+        )
+        contexts = aggregate_context_annotations(annotation, n_genes, n_contexts, mode="sum")
+        context_effects = np.array([0.08, 0.06], dtype=np.float32)
+        expected_deviations = np.array([[-0.03, 0.02], [0.01, -0.02]], dtype=np.float32)
+        n_samples = 100.0
+        chisq = 1.0 + n_samples * (
+            annotation @ (context_effects[None, :] + expected_deviations).ravel()
+        )
+        block = LdChromosomeBlock(
+            chrom=1,
+            rows=np.arange(8),
+            R2=sp.eye(8, format="csr", dtype=np.float32),
+        )
+        dataset = CompassDataset(
+            A=annotation,
+            chisq=np.asarray(chisq, dtype=np.float32),
+            chrom=np.ones(8, dtype=np.int64),
+            n_samples=n_samples,
+            ld_blocks=[block],
+            sample_weight=np.ones(8, dtype=np.float32),
+            context_annotations=contexts,
+        )
+        deviations, fitted_contexts, _, tau, _, metadata = fit_hierarchical_nuclear(
+            dataset,
+            n_genes,
+            n_contexts,
+            lambda_value=0.0,
+            fixed_context_effects=context_effects,
+            init_tau=0.0,
+            lr=1e-3,
+            max_iter=100,
+            tol=1e-8,
+            objective_relative_tol=1e-10,
+            objective_window=20,
+            device="cpu",
+            deviation_constraint="total_nonnegative",
+        )
+        np.testing.assert_allclose(deviations, expected_deviations, atol=1e-6)
+        np.testing.assert_allclose(fitted_contexts, context_effects)
+        self.assertAlmostEqual(tau, 0.0, places=7)
+        self.assertTrue(np.all(fitted_contexts[None, :] + deviations >= -1e-7))
+        self.assertEqual(metadata["deviation_constraint"], "total_nonnegative")
 
     def test_context_effects_are_not_shrunk_with_gene_deviations(self):
         n_variants = 12

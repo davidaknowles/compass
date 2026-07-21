@@ -150,6 +150,19 @@ def context_heritability_from_masses(
     }
 
 
+def gene_deviation_heritability_from_masses(
+    annotation_mass: np.ndarray,
+    B: np.ndarray,
+) -> np.ndarray:
+    """Return fitted direct deviation contribution for each gene and context."""
+
+    annotation_mass = np.asarray(annotation_mass)
+    B = np.asarray(B)
+    if annotation_mass.shape != B.shape or B.ndim != 2:
+        raise ValueError("annotation mass and B must be matching gene-by-context matrices")
+    return annotation_mass * B
+
+
 def _relative_change(next_value: torch.Tensor, current_value: torch.Tensor) -> torch.Tensor:
     """Compute a stable relative update norm even when model parameters are fp16."""
 
@@ -640,7 +653,7 @@ def _svt_from_gram(B: torch.Tensor, threshold: float) -> torch.Tensor:
     return (B @ eigenvectors * scale.unsqueeze(0)) @ eigenvectors.T
 
 
-def nuclear_prox_nonnegative(
+def nuclear_prox(
     B: torch.Tensor,
     threshold: float,
     svd_method: str = "auto",
@@ -648,6 +661,8 @@ def nuclear_prox_nonnegative(
     svd_oversamples: int = 5,
     svd_n_iter: int = 2,
 ) -> torch.Tensor:
+    """Apply singular-value soft thresholding without an entrywise constraint."""
+
     with torch.no_grad():
         B = torch.nan_to_num(B, nan=0.0, posinf=0.0, neginf=0.0)
         min_dim = min(B.shape)
@@ -658,7 +673,7 @@ def nuclear_prox_nonnegative(
             raise ValueError(f"Unknown svd_method: {svd_method}")
         if not use_randomized and B.shape[0] >= B.shape[1]:
             out = _svt_from_gram(B, threshold)
-            return torch.clamp(torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0), min=0.0)
+            return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         elif use_randomized:
             U, S, Vh = _randomized_svd(
                 B,
@@ -670,7 +685,71 @@ def nuclear_prox_nonnegative(
             U, S, Vh = torch.linalg.svd(B, full_matrices=False)
         S = torch.clamp(S - threshold, min=0.0)
         out = (U * S.unsqueeze(0)) @ Vh
-        return torch.clamp(torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0), min=0.0)
+        return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def nuclear_prox_lower_bound(
+    B: torch.Tensor,
+    threshold: float,
+    lower_bound: torch.Tensor | float,
+    svd_method: str = "auto",
+    svd_rank: int | None = None,
+    svd_oversamples: int = 5,
+    svd_n_iter: int = 2,
+    max_iter: int = 50,
+    tol: float = 1e-6,
+) -> torch.Tensor:
+    """Proximal map for nuclear norm plus an elementwise lower bound."""
+
+    if max_iter < 1:
+        raise ValueError("max_iter must be positive")
+    if tol < 0:
+        raise ValueError("tol must be non-negative")
+    with torch.no_grad():
+        lower = torch.as_tensor(lower_bound, dtype=B.dtype, device=B.device)
+        x = torch.maximum(torch.nan_to_num(B, nan=0.0, posinf=0.0, neginf=0.0), lower)
+        nuclear_dual = torch.zeros_like(x)
+        bound_dual = torch.zeros_like(x)
+        for _ in range(max_iter):
+            nuclear_input = x + nuclear_dual
+            after_nuclear = nuclear_prox(
+                nuclear_input,
+                threshold,
+                svd_method=svd_method,
+                svd_rank=svd_rank,
+                svd_oversamples=svd_oversamples,
+                svd_n_iter=svd_n_iter,
+            )
+            nuclear_dual = nuclear_input - after_nuclear
+            bound_input = after_nuclear + bound_dual
+            next_x = torch.maximum(bound_input, lower)
+            bound_dual = bound_input - next_x
+            relative = torch.linalg.vector_norm((next_x - x).float()) / torch.clamp(
+                torch.linalg.vector_norm(x.float()), min=torch.finfo(torch.float32).eps
+            )
+            x = next_x
+            if float(relative.cpu()) <= tol:
+                break
+        return x
+
+
+def nuclear_prox_nonnegative(
+    B: torch.Tensor,
+    threshold: float,
+    svd_method: str = "auto",
+    svd_rank: int | None = None,
+    svd_oversamples: int = 5,
+    svd_n_iter: int = 2,
+) -> torch.Tensor:
+    return nuclear_prox_lower_bound(
+        B,
+        threshold,
+        0.0,
+        svd_method=svd_method,
+        svd_rank=svd_rank,
+        svd_oversamples=svd_oversamples,
+        svd_n_iter=svd_n_iter,
+    )
 
 
 def fit_nuclear_norm(
@@ -827,6 +906,7 @@ def fit_hierarchical_nuclear(
     step_backoff: float = 0.5,
     step_increase_tolerance: float = 1e-5,
     step_backtrack_patience: int = 5,
+    deviation_constraint: str = "total_nonnegative",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, list[float], dict]:
     """Fit unpenalized context effects plus nuclear-penalized gene deviations."""
 
@@ -840,6 +920,8 @@ def fit_hierarchical_nuclear(
         raise ValueError("step_increase_tolerance must be non-negative")
     if step_backtrack_patience < 1:
         raise ValueError("step_backtrack_patience must be positive")
+    if deviation_constraint not in {"nonnegative", "total_nonnegative"}:
+        raise ValueError("deviation_constraint must be 'nonnegative' or 'total_nonnegative'")
     train_dtype = _torch_dtype(model_dtype)
     block_specs = _prepare_fit_blocks(dataset, device) if prepared_blocks is None else prepared_blocks
     total_den = int(sum(int(torch.count_nonzero(block["weight"]).item()) for block in block_specs))
@@ -971,9 +1053,15 @@ def fit_hierarchical_nuclear(
             b_grad = torch.nan_to_num(B.grad, nan=0.0, posinf=0.0, neginf=0.0)
             if grad_clip is not None:
                 b_grad = torch.clamp(b_grad, min=-grad_clip, max=grad_clip)
-            B_next = nuclear_prox_nonnegative(
+            lower_bound = (
+                0.0
+                if deviation_constraint == "nonnegative"
+                else -context_next.float().unsqueeze(0)
+            )
+            B_next = nuclear_prox_lower_bound(
                 (B - effective_lr * b_grad).float(),
                 effective_lr * lambda_value,
+                lower_bound,
                 svd_method=svd_method,
                 svd_rank=svd_rank,
                 svd_oversamples=svd_oversamples,
@@ -1054,6 +1142,7 @@ def fit_hierarchical_nuclear(
         "stagnation_patience": stagnation_patience,
         "model_dtype": model_dtype,
         "ld_dtype": "float16",
+        "deviation_constraint": deviation_constraint,
     }
     return (
         B.detach().float().cpu().numpy(),
@@ -1486,6 +1575,7 @@ def _load_or_initialize_hierarchical_cv_checkpoint(
     fixed_context_effects: np.ndarray | None,
     scale_fixed_context_effects: bool,
     freeze_scaled_context_effects: bool,
+    deviation_constraint: str,
 ) -> dict[str, np.ndarray]:
     """Load compatible fold states or initialize an empty checkpoint."""
 
@@ -1510,6 +1600,7 @@ def _load_or_initialize_hierarchical_cv_checkpoint(
             "fixed_context_effects",
             "scale_fixed_context_effects",
             "freeze_scaled_context_effects",
+            "deviation_constraint",
         }
         missing = required.difference(checkpoint)
         if missing:
@@ -1529,6 +1620,8 @@ def _load_or_initialize_hierarchical_cv_checkpoint(
             == bool(scale_fixed_context_effects)
             and bool(np.asarray(checkpoint["freeze_scaled_context_effects"]).item())
             == bool(freeze_scaled_context_effects)
+            and str(np.asarray(checkpoint["deviation_constraint"]).item())
+            == deviation_constraint
         )
         if not compatible:
             raise ValueError(
@@ -1550,6 +1643,7 @@ def _load_or_initialize_hierarchical_cv_checkpoint(
         "fixed_context_effects": profile,
         "scale_fixed_context_effects": np.asarray(scale_fixed_context_effects, dtype=np.bool_),
         "freeze_scaled_context_effects": np.asarray(freeze_scaled_context_effects, dtype=np.bool_),
+        "deviation_constraint": np.asarray(deviation_constraint),
     }
     _save_hierarchical_cv_checkpoint(checkpoint_path, checkpoint)
     return checkpoint
@@ -1576,6 +1670,7 @@ def fit_hierarchical_nuclear_path(
     if dataset.context_annotations is None:
         raise ValueError("hierarchical fitting requires context annotations")
     ordered = sorted({float(value) for value in lambdas}, reverse=True)
+    deviation_constraint = str(kwargs.get("deviation_constraint", "total_nonnegative"))
     prepared_blocks = _prepare_fit_blocks(dataset, kwargs.get("device", "cpu"))
     cv_scores: dict[float, float] | None = None
     cv_folds = None
@@ -1608,6 +1703,7 @@ def fit_hierarchical_nuclear_path(
                 fixed_context_effects,
                 scale_fixed_context_effects,
                 freeze_scaled_context_effects,
+                deviation_constraint,
             )
             ordered = checkpoint["lambdas"].tolist()
         fold_scores: dict[float, list[float]] = {value: [] for value in ordered}
@@ -1767,6 +1863,7 @@ def fit_hierarchical_nuclear_path(
         "cv_fold_subset": cv_folds if cv_fold_subset is not None else None,
         "context_update": "joint_nonnegative_weighted_least_squares",
         "freeze_scaled_context_effects": freeze_scaled_context_effects,
+        "deviation_constraint": deviation_constraint,
         "lambda_extensions": max(0, len(ordered) - len({float(value) for value in lambdas})),
         "lambda_extension_factor": lambda_extension_factor,
         "cv_checkpoint_path": str(cv_checkpoint_path) if cv_checkpoint_path is not None else None,

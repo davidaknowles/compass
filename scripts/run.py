@@ -561,7 +561,7 @@ def main() -> None:
         help="Hierarchical CV checkpoint path (defaults to RUN_NAME.hierarchical_cv_checkpoint.npz)",
     )
     parser.add_argument("--method", default="nuclear", choices=["nuclear", "hierarchical", "rank1"])
-    parser.add_argument("--context-annotation", default="binary", choices=["binary", "sum"])
+    parser.add_argument("--context-annotation", default="sum", choices=["binary", "sum"])
     parser.add_argument(
         "--context-annotation-source",
         default="gene_aggregate",
@@ -572,6 +572,12 @@ def main() -> None:
         "--context-effects-mode",
         default="scaled_frozen",
         choices=["fixed", "scaled", "scaled_frozen"],
+    )
+    parser.add_argument(
+        "--deviation-constraint",
+        default="total_nonnegative",
+        choices=["total_nonnegative", "nonnegative"],
+        help="Constrain total gene-context coefficients or legacy deviations to be non-negative",
     )
     parser.add_argument(
         "--regression-weighting",
@@ -641,6 +647,12 @@ def main() -> None:
     }
     if args.context_annotation_source == "peak" and args.annotation_source != "open_chromatin":
         parser.error("--context-annotation-source peak requires --annotation-source open_chromatin")
+    if args.method == "hierarchical" and args.deviation_constraint == "total_nonnegative":
+        if args.context_annotation_source != "gene_aggregate" or args.context_annotation != "sum":
+            parser.error(
+                "--deviation-constraint total_nonnegative requires "
+                "--context-annotation-source gene_aggregate --context-annotation sum"
+            )
     gwas_path = Path(args.gwas).expanduser() if args.gwas else data_root / "raw" / "ad_gwas_2026" / "GCST90704647.hg19.tsv.gz"
     ld_dir = Path(args.ld_dir).expanduser() if args.ld_dir else data_root / "raw" / "ukbb_ld"
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else data_root / "results"
@@ -919,6 +931,7 @@ def main() -> None:
                 svd_oversamples=args.svd_oversamples,
                 svd_n_iter=args.svd_n_iter,
                 ld_chunk_nnz=args.ld_chunk_nnz,
+                deviation_constraint=args.deviation_constraint,
             )
         else:
             fit = fit_rank1_path(
@@ -991,6 +1004,7 @@ def main() -> None:
             str(Path(args.context_effects_tsv).expanduser()) if args.context_effects_tsv else None
         ),
         "context_effects_mode": args.context_effects_mode if args.context_effects_tsv else None,
+        "deviation_constraint": args.deviation_constraint if args.method == "hierarchical" else None,
         "context_annotation_counts": (
             context_summary["annotation_count"]
             if fit.context_effects is not None

@@ -30,6 +30,7 @@ def main() -> None:
         "fixed_context_effects",
         "scale_fixed_context_effects",
         "freeze_scaled_context_effects",
+        "deviation_constraint",
     )
     for shard_path in args.shard:
         shard = _load(shard_path)
