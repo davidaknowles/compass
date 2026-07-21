@@ -123,6 +123,14 @@ Jointly re-estimating $s$ at every value of $\lambda$ creates an avoidable alloc
 
 The calibrated analysis is deliberately a two-stage conditional model. Because $q$ is estimated from the same GWAS, its cell-type ordering is not an independent COMPASS discovery, and cross-validation selects only the penalty on $D$ conditional on $q$. The analysis asks whether gene-specific departures improve held-out prediction while retaining a BaselineLD-adjusted context contrast; it is not an unbiased end-to-end validation of that contrast.
 
+For interpretation, we report the context-wide and gene-specific contributions separately. If $c_l=\sum_j A_{jl}$ is the number of variants in the binary context annotation, the direct heritability attributed to context $l$ is
+\begin{equation}
+    H_l^{\mathrm{global}}=c_l s q_l,\qquad
+    H_l^{\mathrm{deviation}}=\sum_{j,k}a_{jkl}D_{kl},\qquad
+    H_l^{\mathrm{total}}=H_l^{\mathrm{global}}+H_l^{\mathrm{deviation}}.
+\end{equation}
+This decomposition tests whether a weakly penalized deviation matrix changes the aggregate cell-type ranking even though the global component is fixed.
+
 \subsection{The Necessity of Non-Negativity}
 While standard summary statistic methods occasionally tolerate negative enrichment parameters, enforcing $B_{kl} \ge 0$ is mandatory in this gene-centric framework. Without non-negativity constraints, the optimization landscape suffers from two failures:
 

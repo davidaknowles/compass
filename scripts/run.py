@@ -35,6 +35,7 @@ from compass.model import (
     CompassDataset,
     LdChromosomeBlock,
     aggregate_context_annotations,
+    context_heritability_components,
     fit_hierarchical_nuclear_path,
     fit_nuclear_norm_path,
     fit_rank1_path,
@@ -927,7 +928,12 @@ def main() -> None:
     np.savez_compressed(f"{prefix}.npz", **result_arrays)
     pd.DataFrame(fit.B, index=genes["gene"], columns=mechanisms).to_csv(f"{prefix}.B.tsv", sep="\t")
     if fit.context_effects is not None:
-        context_counts = np.asarray(dataset.context_annotations.sum(axis=0)).ravel()
+        context_summary = context_heritability_components(
+            dataset.A,
+            fit.B,
+            dataset.context_annotations,
+            fit.context_effects,
+        )
         pd.DataFrame(
             {
                 "context": mechanisms,
@@ -939,10 +945,16 @@ def main() -> None:
                     out=np.zeros_like(fit.context_effects),
                     where=fit.context_effect_se > 0,
                 ),
-                "annotation_count": context_counts,
-                "implied_h2": fit.context_effects * context_counts,
+                "annotation_count": context_summary["annotation_count"],
+                "implied_h2": context_summary["global_h2"],
             }
         ).to_csv(f"{prefix}.context_effects.tsv", sep="\t", index=False)
+        pd.DataFrame(
+            {
+                "context": mechanisms,
+                **context_summary,
+            }
+        ).to_csv(f"{prefix}.context_contributions.tsv", sep="\t", index=False)
     ld_diagnostics.to_csv(f"{prefix}.ld_diagnostics.tsv", sep="\t", index=False)
     metadata = {
         "method": fit.method,
@@ -957,10 +969,11 @@ def main() -> None:
         ),
         "context_effects_mode": args.context_effects_mode if args.context_effects_tsv else None,
         "context_annotation_counts": (
-            np.asarray(dataset.context_annotations.sum(axis=0)).ravel()
+            context_summary["annotation_count"]
             if fit.context_effects is not None
             else None
         ),
+        "context_heritability_components": context_summary if fit.context_effects is not None else None,
         "regression_weighting": (
             "uniform"
             if args.method == "hierarchical" and args.regression_weighting == "auto"

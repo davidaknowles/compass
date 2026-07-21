@@ -11,12 +11,33 @@ from compass.model import (
     CompassDataset,
     LdChromosomeBlock,
     aggregate_context_annotations,
+    context_heritability_components,
     fit_hierarchical_nuclear,
     fit_hierarchical_nuclear_path,
 )
 
 
 class HierarchicalModelTest(unittest.TestCase):
+    def test_context_heritability_components_separates_global_and_deviation_terms(self):
+        annotation = sp.csr_matrix(
+            np.array(
+                [
+                    [1.0, 0.0, 2.0, 1.0],
+                    [0.0, 3.0, 1.0, 0.0],
+                ],
+                dtype=np.float32,
+            )
+        )
+        contexts = sp.csr_matrix(np.array([[1.0, 1.0], [0.0, 1.0]], dtype=np.float32))
+        B = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32)
+        summary = context_heritability_components(
+            annotation, B, contexts, np.array([0.5, 0.25], dtype=np.float32)
+        )
+        np.testing.assert_allclose(summary["global_h2"], [0.5, 0.5])
+        np.testing.assert_allclose(summary["deviation_h2"], [1.0, 1.0])
+        np.testing.assert_allclose(summary["total_h2"], [1.5, 1.5])
+        np.testing.assert_allclose(summary["fraction"], [0.5, 0.5])
+
     def test_aggregate_context_annotations_supports_binary_and_sum(self):
         annotation = sp.csr_matrix(
             np.array(

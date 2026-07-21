@@ -95,6 +95,42 @@ def aggregate_context_annotations(
     return sp.hstack(columns, format="csr", dtype=np.float32)
 
 
+def context_heritability_components(
+    annotation: sp.csr_matrix,
+    B: np.ndarray,
+    context_annotations: sp.csr_matrix,
+    context_effects: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Summarize direct heritability from global and gene-specific context terms."""
+
+    B = np.asarray(B)
+    context_effects = np.asarray(context_effects)
+    if B.ndim != 2:
+        raise ValueError("B must be a gene-by-context matrix")
+    n_genes, n_contexts = B.shape
+    if annotation.shape[1] != n_genes * n_contexts:
+        raise ValueError("annotation shape does not match B")
+    if context_annotations.shape != (annotation.shape[0], n_contexts):
+        raise ValueError("context annotation shape does not match B")
+    if context_effects.shape != (n_contexts,):
+        raise ValueError("context effects must contain one value per context")
+
+    annotation_mass = np.asarray(annotation.sum(axis=0)).ravel().reshape(n_genes, n_contexts)
+    context_mass = np.asarray(context_annotations.sum(axis=0)).ravel()
+    global_h2 = context_mass * context_effects
+    deviation_h2 = np.sum(annotation_mass * B, axis=0)
+    total_h2 = global_h2 + deviation_h2
+    denominator = float(total_h2.sum())
+    fraction = total_h2 / denominator if denominator > 0 else np.zeros_like(total_h2)
+    return {
+        "annotation_count": context_mass,
+        "global_h2": global_h2,
+        "deviation_h2": deviation_h2,
+        "total_h2": total_h2,
+        "fraction": fraction,
+    }
+
+
 def _relative_change(next_value: torch.Tensor, current_value: torch.Tensor) -> torch.Tensor:
     """Compute a stable relative update norm even when model parameters are fp16."""
 
