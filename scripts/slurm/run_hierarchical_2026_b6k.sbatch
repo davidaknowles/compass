@@ -57,8 +57,8 @@ python scripts/run.py \
   --device cuda \
   --model-dtype float32 \
   --lr 3e-7 \
-  --lambdas 1e6,1e5,1e4,1e3,3e2,1e2,3e1,1e1,3,1,3e-1,1e-1,3e-2,1e-2,3e-3,1e-3,3e-4,1e-4,3e-5,1e-5 \
-  --max-lambda-extensions 4 \
+  --lambdas 1e6,1e5,1e4,1e3,3e2,1e2,3e1,1e1 \
+  --max-lambda-extensions 0 \
   --lambda-extension-factor 3 \
   --ld-jobs 8 \
   --run-name "$run_name"
