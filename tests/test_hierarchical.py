@@ -242,6 +242,42 @@ class HierarchicalModelTest(unittest.TestCase):
                 device="cpu",
             )
             self.assertEqual(resumed.cv_scores, path.cv_scores)
+
+            subset_checkpoint = Path(temporary_directory) / "hierarchical_cv_fold1.npz"
+            subset = fit_hierarchical_nuclear_path(
+                dataset,
+                n_genes,
+                n_mechanisms,
+                lambdas=[1000.0],
+                fixed_context_effects=profile,
+                fixed_context_effect_se=np.zeros(2, dtype=np.float32),
+                scale_fixed_context_effects=True,
+                freeze_scaled_context_effects=True,
+                cv_checkpoint_path=subset_checkpoint,
+                cv_fold_subset=[1],
+                max_lambda_extensions=0,
+                lr=1e-3,
+                max_iter=12,
+                device="cpu",
+            )
+            self.assertEqual(subset.metadata["cv_folds"], [1])
+            self.assertEqual(subset.metadata["cv_fold_subset"], [1])
+            with np.load(subset_checkpoint) as saved:
+                np.testing.assert_array_equal(saved["folds"], [1])
+                np.testing.assert_array_equal(saved["next_lambda_index"], [1])
+                self.assertTrue(np.isfinite(saved["scores"]).all())
+
+            with self.assertRaisesRegex(ValueError, "unavailable folds"):
+                fit_hierarchical_nuclear_path(
+                    dataset,
+                    n_genes,
+                    n_mechanisms,
+                    lambdas=[1000.0],
+                    cv_fold_subset=[2],
+                    max_lambda_extensions=0,
+                    max_iter=1,
+                    device="cpu",
+                )
             with self.assertRaisesRegex(ValueError, "checkpoint is incompatible"):
                 fit_hierarchical_nuclear_path(
                     dataset,

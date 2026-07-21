@@ -1566,6 +1566,7 @@ def fit_hierarchical_nuclear_path(
     scale_fixed_context_effects: bool = False,
     freeze_scaled_context_effects: bool = False,
     cv_checkpoint_path: str | Path | None = None,
+    cv_fold_subset: list[int] | None = None,
     max_lambda_extensions: int = 4,
     lambda_extension_factor: float = 3.0,
     **kwargs,
@@ -1582,7 +1583,19 @@ def fit_hierarchical_nuclear_path(
         if dataset.cv_groups is None or dataset.cv_score_groups is None:
             raise ValueError("LD-component CV groups are required")
         groups = np.asarray(dataset.cv_groups)
-        cv_folds = sorted(int(value) for value in np.unique(groups) if int(value) >= 0)
+        available_folds = sorted(int(value) for value in np.unique(groups) if int(value) >= 0)
+        if cv_fold_subset is None:
+            cv_folds = available_folds
+        else:
+            cv_folds = sorted({int(value) for value in cv_fold_subset})
+            if not cv_folds:
+                raise ValueError("cv_fold_subset must contain at least one fold")
+            unknown_folds = sorted(set(cv_folds).difference(available_folds))
+            if unknown_folds:
+                raise ValueError(
+                    f"cv_fold_subset contains unavailable folds: {unknown_folds}; "
+                    f"available folds are {available_folds}"
+                )
         base_lambdas = ordered.copy()
         checkpoint = None
         if cv_checkpoint_path is not None:
@@ -1751,6 +1764,7 @@ def fit_hierarchical_nuclear_path(
     metadata = {
         "cv_method": "ld_component" if cv else None,
         "cv_folds": cv_folds,
+        "cv_fold_subset": cv_folds if cv_fold_subset is not None else None,
         "context_update": "joint_nonnegative_weighted_least_squares",
         "freeze_scaled_context_effects": freeze_scaled_context_effects,
         "lambda_extensions": max(0, len(ordered) - len({float(value) for value in lambdas})),

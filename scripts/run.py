@@ -90,6 +90,13 @@ def _parse_lambdas(value: str) -> list[float]:
     return lambdas
 
 
+def _parse_ints(value: str) -> list[int]:
+    values = [int(x) for x in value.split(",") if x.strip()]
+    if not values:
+        raise argparse.ArgumentTypeError("at least one integer is required")
+    return values
+
+
 def _json_safe(value):
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
@@ -516,6 +523,12 @@ def main() -> None:
     parser.add_argument("--open-chromatin-tss-window", type=int, default=100_000)
     parser.add_argument("--peak-assay", default="ATAC", choices=sorted(PEAK_ASSAY_FILES))
     parser.add_argument("--cv-folds", type=int, default=10)
+    parser.add_argument(
+        "--cv-fold-subset",
+        type=_parse_ints,
+        default=None,
+        help="Run only these existing CV fold labels, for isolated parallel execution",
+    )
     parser.add_argument("--cv-r2-threshold", type=float, default=0.01)
     parser.add_argument("--gwas", default=None)
     parser.add_argument("--ld-dir", default=None)
@@ -890,6 +903,7 @@ def main() -> None:
                 ),
                 freeze_scaled_context_effects=(args.context_effects_mode == "scaled_frozen"),
                 cv_checkpoint_path=cv_checkpoint_path if not args.no_cv else None,
+                cv_fold_subset=args.cv_fold_subset,
                 max_lambda_extensions=args.max_lambda_extensions,
                 lambda_extension_factor=args.lambda_extension_factor,
                 lr=args.lr,
@@ -1012,6 +1026,7 @@ def main() -> None:
         "cv_component_metadata": cv_metadata,
         "cache_key": key,
         "cv": not args.no_cv,
+        "cv_fold_subset": args.cv_fold_subset,
         "cv_checkpoint": (
             str(cv_checkpoint_path)
             if args.method == "hierarchical" and not args.no_cv
