@@ -117,6 +117,25 @@ def context_heritability_components(
 
     annotation_mass = np.asarray(annotation.sum(axis=0)).ravel().reshape(n_genes, n_contexts)
     context_mass = np.asarray(context_annotations.sum(axis=0)).ravel()
+    return context_heritability_from_masses(annotation_mass, B, context_mass, context_effects)
+
+
+def context_heritability_from_masses(
+    annotation_mass: np.ndarray,
+    B: np.ndarray,
+    context_mass: np.ndarray,
+    context_effects: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Summarize context contributions from precomputed annotation column masses."""
+
+    annotation_mass = np.asarray(annotation_mass)
+    B = np.asarray(B)
+    context_mass = np.asarray(context_mass)
+    context_effects = np.asarray(context_effects)
+    if annotation_mass.shape != B.shape:
+        raise ValueError("annotation mass must have the same gene-by-context shape as B")
+    if context_mass.shape != (B.shape[1],) or context_effects.shape != (B.shape[1],):
+        raise ValueError("context mass and effects must contain one value per context")
     global_h2 = context_mass * context_effects
     deviation_h2 = np.sum(annotation_mass * B, axis=0)
     total_h2 = global_h2 + deviation_h2
