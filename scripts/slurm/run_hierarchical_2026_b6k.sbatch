@@ -56,6 +56,7 @@ python scripts/run.py \
   --context-effects-mode scaled_frozen \
   --device cuda \
   --model-dtype float32 \
+  --lr 1e-7 \
   --lambdas 1e6,1e5,1e4,1e3,3e2,1e2,3e1,1e1,3,1,3e-1,1e-1,3e-2,1e-2,3e-3,1e-3,3e-4,1e-4,3e-5,1e-5 \
   --max-lambda-extensions 4 \
   --lambda-extension-factor 3 \

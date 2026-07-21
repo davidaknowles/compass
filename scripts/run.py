@@ -532,7 +532,12 @@ def main() -> None:
     parser.add_argument("--lambda-extension-factor", type=float, default=3.0)
     parser.add_argument("--max-iter", type=int, default=500)
     parser.add_argument("--progress-every", type=int, default=10)
-    parser.add_argument("--lr", type=float, default=1e-8)
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Proximal step size (default: 1e-7 hierarchical, 1e-8 otherwise)",
+    )
     parser.add_argument("--tol", type=float, default=1e-2)
     parser.add_argument("--objective-relative-tol", type=float, default=1e-5)
     parser.add_argument("--objective-window", type=int, default=10)
@@ -599,6 +604,10 @@ def main() -> None:
         parser.error("--method rank1 requires --init-b-tsv")
     if args.context_effects_tsv is not None and args.method != "hierarchical":
         parser.error("--context-effects-tsv requires --method hierarchical")
+    if args.lr is None:
+        args.lr = 1e-7 if args.method == "hierarchical" else 1e-8
+    if args.lr <= 0:
+        parser.error("--lr must be positive")
 
     data_root = Path(args.data_root).expanduser()
     top_assoc_dir = Path(args.top_assoc_dir).expanduser() if args.top_assoc_dir else data_root / "raw" / "zenodo_top_assoc"
@@ -989,6 +998,8 @@ def main() -> None:
         "n_samples_source": n_samples_source,
         "device": device,
         "model_dtype": args.model_dtype,
+        "lr": args.lr,
+        "max_iter": args.max_iter,
         "ld_dtype": "float16",
         "ld_chunk_nnz": args.ld_chunk_nnz,
         "max_lambda_extensions": args.max_lambda_extensions,
