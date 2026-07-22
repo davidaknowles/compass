@@ -87,7 +87,10 @@ def main() -> None:
 
     root = Path(args.data_root).expanduser() / "raw" / "neuropsychiatric_gwas"
     selected = args.traits or sorted(SOURCES)
-    manifest: dict[str, dict[str, object]] = {}
+    manifest_path = root / "sources.json"
+    manifest: dict[str, dict[str, object]] = (
+        json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
+    )
     for trait in selected:
         metadata = SOURCES[trait]
         destination = root / trait / str(metadata["filename"])
@@ -105,7 +108,6 @@ def main() -> None:
             "bytes": destination.stat().st_size,
             **({"archive_path": str(archive)} if archive else {}),
         }
-    manifest_path = root / "sources.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     print(f"wrote {manifest_path}")
 
