@@ -6,6 +6,8 @@
 - Source predictions are GRCh38. Preparation filters each chromosome independently, lifts unique variant positions to hg19, discards failed, cross-chromosome, and multiply mapped positions, and takes the maximum probability for duplicate variant-gene-context links. The prepared chromosome-partitioned table is shared by COMPASS and S-LDSC.
 - COMPASS retains every GWAS variant represented in the UKBB LD panel. Predicted-eQTL links populate the mediated variant-gene-context matrix, and an explicit non-mediated residual LD-score term remains in the model. BaselineLD-adjusted S-LDSC uses the sum of predicted-eQTL probabilities over genes as six continuous variant annotations.
 - A real chromosome-22 preparation smoke test retained 327,433 unique lifted links from 351,144 thresholded source links in 28 seconds, with 0.64 GB peak resident memory.
+- The full shared preparation, annotation build, and chromosome LD-score array are jobs `19309517`, `19309518`, and `19309519`. Trait-specific S-LDSC fit/extract jobs are PD `19309520`--`19309521`, bipolar `19309536`--`19309537`, MDD `19309552`--`19309553`, ALS `19309568`--`19309569`, and anxiety `19309584`--`19309585`.
+- Each COMPASS branch serializes cache construction through fold 0 before releasing the other nine folds. Fold ranges are PD `19309522`--`19309531`, bipolar `19309538`--`19309547`, MDD `19309554`--`19309563`, ALS `19309570`--`19309579`, and anxiety `19309586`--`19309595`; merge, refit, and two GSEA jobs follow each range. The complete machine-readable job table is `predicted-eqtl-pipeline-jobs-20260722.tsv` in the analysis logs.
 
 ## 2026-07-22 corrected AD signed analysis
 
