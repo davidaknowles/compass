@@ -1,5 +1,9 @@
 # LAB NOTEBOOK
 
+## 2026-07-22 corrected AD signed analysis
+
+- No corrected signed gene-summed fit had been run for the 2026 AD GWAS. Submitted ten isolated LD-component CV folds (`19304865`--`19304874`) using the same H3K27ac peak-to-expressed-TSS annotations, frozen BaselineLD S-LDSC context profile, signed deviations constrained by `s q + D >= 0`, eight-penalty grid, fp32 model parameters, and fp16 chromosome-level LD representation used for corrected SCZ. Checkpoint watcher `19304876` stops each shard after all CV scores are atomically saved; merge `19304877` and full-data refit `19304878` follow. Ordered contribution-weighted g:Profiler jobs `19304879` and `19304880` will analyze the smallest positive gene sets accounting for 25% and 50% of fitted signed deviation contribution, using all assayed genes as background.
+
 ## 2026-07-20 hierarchical context effects
 
 - The original nuclear penalty acts on the complete gene-by-context matrix and therefore shrinks both context-wide and gene-specific effects. Added a hierarchical decomposition with an unpenalized global context layer and a non-negative nuclear-regularized gene-deviation matrix. At large deviation penalty, the model reduces to one shared coefficient per context, matching the gene-aggregated S-LDSC assumption.
