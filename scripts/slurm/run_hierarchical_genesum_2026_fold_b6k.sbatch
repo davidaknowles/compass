@@ -42,9 +42,9 @@ case "$trait" in
     effects="$data_root/results/scz2026_h3k27ac_sldsc_context_effects.tsv"
     ;;
   pd)
-    analysis_label=pd2019
+    analysis_label=pd2025
     gwas="$data_root/raw/neuropsychiatric_gwas/pd/pd.hg19.tsv.gz"
-    effects="$data_root/results/pd2019_h3k27ac_sldsc_context_effects.tsv"
+    effects="$data_root/results/pd2025_h3k27ac_sldsc_context_effects.tsv"
     ;;
   bipolar)
     analysis_label=bipolar2025

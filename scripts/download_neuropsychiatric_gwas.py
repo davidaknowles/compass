@@ -7,16 +7,20 @@ import argparse
 import json
 import shutil
 import urllib.request
+import zipfile
 from pathlib import Path
 
 
 SOURCES = {
     "pd": {
-        "filename": "GCST009324.tsv.gz",
-        "url": "https://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST009001-GCST010000/GCST009324/GCST009324.tsv.gz",
-        "citation": "Nalls et al. 2019, PMID 31701892",
+        "filename": "GP2_ALL_EUR_CLINICAL_ONLY_HG38_12162024.txt.gz",
+        "archive_filename": "GP2_euro_ancestry_meta_analysis_2024.zip",
+        "archive_member": "GP2_ALL_EUR_CLINICAL_ONLY_HG38_12162024.txt.gz",
+        "url": "https://api.kpndataregistry.org/api/d/7j5797",
+        "citation": "Leonard et al. 2025, DOI 10.1101/2025.03.14.24319455",
         "population": "European",
-        "sample_size": {"cases": 15056, "controls": 12637, "proxies": 0},
+        "genome_build": "GRCh38",
+        "sample_size": {"cases": 34933, "controls": 31009, "proxies": 0},
     },
     "bipolar": {
         "filename": "bip2024_eur_no23andMe.gz",
@@ -60,6 +64,21 @@ def download(url: str, destination: Path) -> None:
     print(f"downloaded {destination} ({destination.stat().st_size} bytes)", flush=True)
 
 
+def extract_archive_member(archive: Path, member_name: str, destination: Path) -> None:
+    if destination.is_file() and destination.stat().st_size > 0:
+        print(f"exists {destination}", flush=True)
+        return
+    with zipfile.ZipFile(archive) as source:
+        matches = [name for name in source.namelist() if Path(name).name == member_name]
+        if len(matches) != 1:
+            raise ValueError(f"expected one archive member named {member_name}, found {matches}")
+        temporary = destination.with_name(f".{destination.name}.partial")
+        with source.open(matches[0]) as compressed, temporary.open("wb") as target:
+            shutil.copyfileobj(compressed, target, length=8 * 1024 * 1024)
+        temporary.replace(destination)
+    print(f"extracted {destination} ({destination.stat().st_size} bytes)", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", default=str(Path.home() / "knowles_lab" / "data" / "compass"))
@@ -72,8 +91,20 @@ def main() -> None:
     for trait in selected:
         metadata = SOURCES[trait]
         destination = root / trait / str(metadata["filename"])
-        download(str(metadata["url"]), destination)
-        manifest[trait] = {**metadata, "path": str(destination), "bytes": destination.stat().st_size}
+        archive_filename = metadata.get("archive_filename")
+        if archive_filename:
+            archive = destination.parent / str(archive_filename)
+            download(str(metadata["url"]), archive)
+            extract_archive_member(archive, str(metadata["archive_member"]), destination)
+        else:
+            archive = None
+            download(str(metadata["url"]), destination)
+        manifest[trait] = {
+            **metadata,
+            "path": str(destination),
+            "bytes": destination.stat().st_size,
+            **({"archive_path": str(archive)} if archive else {}),
+        }
     manifest_path = root / "sources.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     print(f"wrote {manifest_path}")

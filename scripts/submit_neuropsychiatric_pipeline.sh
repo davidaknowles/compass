@@ -21,7 +21,7 @@ job_id() {
 
 for trait in ${traits[*]}; do
   case "$trait" in
-    pd) label=pd2019 ;;
+    pd) label=pd2025 ;;
     bipolar) label=bipolar2025 ;;
     mdd) label=mdd2025 ;;
     als) label=als2021 ;;

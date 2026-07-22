@@ -18,7 +18,7 @@ trait=$1
 stage=$2
 data_root=/gpfs/commons/home/daknowles/knowles_lab/data/compass
 case "$trait" in
-  pd) analysis_label=pd2019 ;;
+  pd) analysis_label=pd2025 ;;
   bipolar) analysis_label=bipolar2025 ;;
   mdd) analysis_label=mdd2025 ;;
   als) analysis_label=als2021 ;;
