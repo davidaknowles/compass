@@ -22,6 +22,14 @@ ANNOTATION_MAPS = {
         "neuron": "H3K27ac_NeuNL2_0",
         "oligodendrocyte": "H3K27ac_Olig2L2_0",
     },
+    "predicted_eqtl": {
+        "astrocyte": "PredEQTL_astrocyteL2_0",
+        "excitatory_neuron": "PredEQTL_excitatory_neuronL2_0",
+        "inhibitory_neuron": "PredEQTL_inhibitory_neuronL2_0",
+        "microglia": "PredEQTL_microgliaL2_0",
+        "opc": "PredEQTL_opcL2_0",
+        "oligodendrocyte": "PredEQTL_oligodendrocyteL2_0",
+    },
 }
 
 

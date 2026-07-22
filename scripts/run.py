@@ -40,6 +40,7 @@ from compass.model import (
     fit_nuclear_norm_path,
     fit_rank1_path,
 )
+from compass.predicted_eqtl import load_predicted_eqtl_annotations
 
 
 DEFAULT_DATA_ROOT = Path.home() / "knowles_lab" / "data" / "compass"
@@ -123,6 +124,7 @@ def _cache_key(
     abc_path: Path,
     open_chromatin_tss_path: Path,
     open_chromatin_peaks_root: Path,
+    predicted_eqtl_path: Path,
 ) -> str:
     intercept = "intercept" if not args.no_intercept else "nointercept"
     n_samples = "gwas" if args.n_samples is None else f"n{args.n_samples:g}"
@@ -145,6 +147,14 @@ def _cache_key(
         source = (
             f"peaktss.{args.peak_assay}.tsswin{args.open_chromatin_tss_window:g}."
             f"{source_hash}{context_suffix}"
+        )
+    elif args.annotation_source == "predicted_eqtl":
+        annotation_path = hashlib.sha1(
+            str(predicted_eqtl_path.resolve()).encode("utf-8")
+        ).hexdigest()[:12]
+        source = (
+            f"predictedeqtl.min{args.predicted_eqtl_min_score:g}."
+            f"r2ge{args.ld_r2_cutoff:g}.chromfp16.{annotation_path}"
         )
     else:
         source = f"topassoc.{args.annotation_value}"
@@ -512,7 +522,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run genome-wide COMPASS with UKBB LD.")
     parser.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
     parser.add_argument("--top-assoc-dir", default=None)
-    parser.add_argument("--annotation-source", default="abc", choices=["abc", "open_chromatin", "top_assoc"])
+    parser.add_argument(
+        "--annotation-source",
+        default="abc",
+        choices=["abc", "open_chromatin", "predicted_eqtl", "top_assoc"],
+    )
     parser.add_argument("--abc-path", default=None)
     parser.add_argument("--abc-cell-types", default=None)
     parser.add_argument("--abc-context-panel", default="ad_proximal", choices=sorted(ABC_CONTEXT_PANELS))
@@ -522,6 +536,8 @@ def main() -> None:
     parser.add_argument("--open-chromatin-peaks-root", default=None)
     parser.add_argument("--open-chromatin-tss-window", type=int, default=100_000)
     parser.add_argument("--peak-assay", default="ATAC", choices=sorted(PEAK_ASSAY_FILES))
+    parser.add_argument("--predicted-eqtl-path", default=None)
+    parser.add_argument("--predicted-eqtl-min-score", type=float, default=0.9)
     parser.add_argument("--cv-folds", type=int, default=10)
     parser.add_argument(
         "--cv-fold-subset",
@@ -615,6 +631,8 @@ def main() -> None:
         parser.error("--cv-r2-threshold cannot be below --ld-r2-cutoff")
     if args.open_chromatin_tss_window < 0:
         parser.error("--open-chromatin-tss-window must be non-negative")
+    if not 0 <= args.predicted_eqtl_min_score <= 1:
+        parser.error("--predicted-eqtl-min-score must be in [0, 1]")
     if args.objective_relative_tol < 0:
         parser.error("--objective-relative-tol must be non-negative")
     if args.objective_window < 1:
@@ -640,6 +658,11 @@ def main() -> None:
         Path(args.open_chromatin_peaks_root).expanduser()
         if args.open_chromatin_peaks_root
         else data_root / "raw" / "brain-cell-type-peak-files"
+    )
+    predicted_eqtl_path = (
+        Path(args.predicted_eqtl_path).expanduser()
+        if args.predicted_eqtl_path
+        else data_root / "raw" / "predicted_eqtl" / "links.hg19.min0.9"
     )
     peak_files = {
         cell_type: open_chromatin_peaks_root / args.peak_assay / filename
@@ -675,7 +698,14 @@ def main() -> None:
     else:
         device = args.device
 
-    key = _cache_key(args, gwas_path, abc_path, open_chromatin_tss_path, open_chromatin_peaks_root)
+    key = _cache_key(
+        args,
+        gwas_path,
+        abc_path,
+        open_chromatin_tss_path,
+        open_chromatin_peaks_root,
+        predicted_eqtl_path,
+    )
     paths = _cache_paths(cache_dir, key)
     ld_reference_dir = None
     if not args.rebuild_cache and not _dataset_cache_exists(paths):
@@ -708,13 +738,20 @@ def main() -> None:
                     tss_window=args.open_chromatin_tss_window,
                     add_intercept=not args.no_intercept,
                 )
+            elif args.annotation_source == "predicted_eqtl":
+                ann = load_predicted_eqtl_annotations(
+                    predicted_eqtl_path,
+                    gwas,
+                    min_score=args.predicted_eqtl_min_score,
+                    add_intercept=not args.no_intercept,
+                )
             else:
                 ann = load_top_assoc_annotations(
                     top_assoc_dir,
                     annotation_value=args.annotation_value,
                     add_intercept=not args.no_intercept,
                 )
-        if args.annotation_source in {"abc", "open_chromatin"}:
+        if args.annotation_source in {"abc", "open_chromatin", "predicted_eqtl"}:
             with _timed(f"filter annotations to UKBB LD panel with {args.ld_jobs} jobs"):
                 ann_variants = filter_variants_to_ukbb_ld(
                     ann.variants,
@@ -752,7 +789,7 @@ def main() -> None:
                 n_mechanisms=len(ann.mechanisms),
             )
         reusable_ld = None
-        if args.annotation_source in {"abc", "open_chromatin"} and not args.rebuild_cache:
+        if args.annotation_source in {"abc", "open_chromatin", "predicted_eqtl"} and not args.rebuild_cache:
             with _timed("find compatible all-row LD cache"):
                 reusable_ld = _find_compatible_allrow_ld(
                     cache_dir,
@@ -1060,6 +1097,12 @@ def main() -> None:
             args.open_chromatin_tss_window if args.annotation_source == "open_chromatin" else None
         ),
         "peak_assay": args.peak_assay if args.annotation_source == "open_chromatin" else None,
+        "predicted_eqtl_path": (
+            str(predicted_eqtl_path) if args.annotation_source == "predicted_eqtl" else None
+        ),
+        "predicted_eqtl_min_score": (
+            args.predicted_eqtl_min_score if args.annotation_source == "predicted_eqtl" else None
+        ),
         "cv_folds": args.cv_folds if not args.no_cv else None,
         "cv_r2_threshold": args.cv_r2_threshold if not args.no_cv else None,
     }

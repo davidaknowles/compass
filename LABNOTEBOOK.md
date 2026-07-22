@@ -1,5 +1,12 @@
 # LAB NOTEBOOK
 
+## 2026-07-22 predicted-eQTL annotation analysis
+
+- The new annotation source uses CatBoost/GPN predicted eQTL probabilities for astrocytes, excitatory neurons, inhibitory neurons, microglia, OPCs, and oligodendrocytes. The primary threshold is `pred_prob >= 0.9`; lower-confidence predictions are excluded before coordinate conversion.
+- Source predictions are GRCh38. Preparation filters each chromosome independently, lifts unique variant positions to hg19, discards failed, cross-chromosome, and multiply mapped positions, and takes the maximum probability for duplicate variant-gene-context links. The prepared chromosome-partitioned table is shared by COMPASS and S-LDSC.
+- COMPASS retains every GWAS variant represented in the UKBB LD panel. Predicted-eQTL links populate the mediated variant-gene-context matrix, and an explicit non-mediated residual LD-score term remains in the model. BaselineLD-adjusted S-LDSC uses the sum of predicted-eQTL probabilities over genes as six continuous variant annotations.
+- A real chromosome-22 preparation smoke test retained 327,433 unique lifted links from 351,144 thresholded source links in 28 seconds, with 0.64 GB peak resident memory.
+
 ## 2026-07-22 corrected AD signed analysis
 
 - No corrected signed gene-summed fit had been run for the 2026 AD GWAS. Submitted ten isolated LD-component CV folds (`19304865`--`19304874`) using the same H3K27ac peak-to-expressed-TSS annotations, frozen BaselineLD S-LDSC context profile, signed deviations constrained by `s q + D >= 0`, eight-penalty grid, fp32 model parameters, and fp16 chromosome-level LD representation used for corrected SCZ. Checkpoint watcher `19304876` stops each shard after all CV scores are atomically saved; merge `19304877` and full-data refit `19304878` follow. Ordered contribution-weighted g:Profiler jobs `19304879` and `19304880` will analyze the smallest positive gene sets accounting for 25% and 50% of fitted signed deviation contribution, using all assayed genes as background.
