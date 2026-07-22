@@ -6,10 +6,48 @@ from pathlib import Path
 
 import pandas as pd
 
-from compass.baselineld import ABC_COLUMN_NAMES, write_abc_annotations, write_continuous_abc_annotations, write_peak_annotations
+from compass.baselineld import (
+    ABC_COLUMN_NAMES,
+    write_abc_annotations,
+    write_continuous_abc_annotations,
+    write_hapmap3_sumstats,
+    write_peak_annotations,
+)
 
 
 class BaselineLdAnnotationTest(unittest.TestCase):
+    def test_sumstats_use_reference_ids_after_liftover(self):
+        bim = pd.DataFrame(
+            {
+                "CHR": [1, 1, 1],
+                "SNP": ["rs1", "duplicate-a", "duplicate-b"],
+                "CM": [0.0, 0.0, 0.0],
+                "BP": [100, 200, 200],
+                "A1": ["A", "C", "C"],
+                "A2": ["G", "T", "G"],
+            }
+        )
+        gwas = pd.DataFrame(
+            {
+                "CHR": [1, 1],
+                "BP": [100, 200],
+                "SNP": ["chr1:110:A:G", "chr1:210:C:T"],
+                "BETA": [0.2, 0.3],
+                "SE": [0.1, 0.1],
+                "N": [1000, 1000],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "gwas.tsv.gz"
+            output = tmp_path / "sumstats.gz"
+            gwas.to_csv(source, sep="\t", index=False, compression="gzip")
+            count = write_hapmap3_sumstats(source, output, {1: bim})
+            result = pd.read_csv(output, sep="\t")
+        self.assertEqual(count, 1)
+        self.assertEqual(result["SNP"].tolist(), ["rs1"])
+        self.assertAlmostEqual(result.loc[0, "Z"], 2.0)
+
     def test_writes_abc_scores_in_bim_order(self):
         contexts = list(ABC_COLUMN_NAMES)
         bim = pd.DataFrame(

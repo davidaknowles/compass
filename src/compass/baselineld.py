@@ -204,17 +204,44 @@ def write_peak_annotations(
     return counts
 
 
-def write_hapmap3_sumstats(sumstats_path: str | Path, output_path: str | Path) -> int:
-    """Export autosomal Z statistics and known sample sizes for LDSC."""
+def write_hapmap3_sumstats(
+    sumstats_path: str | Path,
+    output_path: str | Path,
+    bim_by_chrom: dict[int, pd.DataFrame] | None = None,
+) -> int:
+    """Export autosomal Z statistics and known sample sizes for LDSC.
+
+    When reference BIMs are supplied, their SNP IDs replace source IDs using
+    unique chromosome-position matches. This is required after coordinate
+    liftover because source coordinate-based IDs still describe the old build.
+    """
 
     source = load_gwas_sumstats(sumstats_path)
-    if "snp" not in source or "n" not in source:
-        raise ValueError("LDSC sumstats require SNP IDs and known per-variant sample sizes")
+    if "n" not in source:
+        raise ValueError("LDSC sumstats require known per-variant sample sizes")
     autosomal = source["chrom"].between(1, 22) if "chrom" in source else pd.Series(True, index=source.index)
-    result = source.loc[
-        autosomal & source["snp"].notna() & source["z"].notna() & source["n"].gt(0),
-        ["snp", "n", "z"],
-    ].rename(columns={"snp": "SNP", "n": "N", "z": "Z"}).drop_duplicates("SNP")
+    valid = source.loc[autosomal & source["z"].notna() & source["n"].gt(0)].copy()
+    if bim_by_chrom is not None:
+        if "chrom" not in valid or "pos" not in valid:
+            raise ValueError("Reference SNP matching requires chromosome and position")
+        reference = pd.concat(
+            [bim[["CHR", "BP", "SNP"]] for _chrom, bim in sorted(bim_by_chrom.items())],
+            ignore_index=True,
+        )
+        reference = reference.drop_duplicates(["CHR", "BP"], keep=False)
+        valid = valid.merge(
+            reference,
+            left_on=["chrom", "pos"],
+            right_on=["CHR", "BP"],
+            how="inner",
+            validate="many_to_one",
+        )
+        result = valid[["SNP", "n", "z"]]
+    else:
+        if "snp" not in valid:
+            raise ValueError("LDSC sumstats require SNP IDs when reference BIMs are absent")
+        result = valid.loc[valid["snp"].notna(), ["snp", "n", "z"]].rename(columns={"snp": "SNP"})
+    result = result.rename(columns={"n": "N", "z": "Z"}).drop_duplicates("SNP")
     if result.empty:
         raise ValueError("No valid autosomal summary statistics with known sample sizes")
     output_path = Path(output_path)

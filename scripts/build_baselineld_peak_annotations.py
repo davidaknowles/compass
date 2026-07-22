@@ -72,6 +72,7 @@ def main() -> None:
     n_sumstats = write_hapmap3_sumstats(
         gwas_path,
         out_dir / "sumstats.gz",
+        bims,
     )
     manifest = {
         "annotations": list(peak_files),
