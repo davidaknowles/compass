@@ -6,6 +6,7 @@ input_dir=${1:?usage: run_official_sldsc_baselineld_annotations.sh INPUT_DIR PRE
 prefix=${2:?usage: run_official_sldsc_baselineld_annotations.sh INPUT_DIR PREFIX OUTPUT_DIR}
 output_dir=${3:?usage: run_official_sldsc_baselineld_annotations.sh INPUT_DIR PREFIX OUTPUT_DIR}
 sumstats=${4:-"$input_dir/sumstats.gz"}
+output_name=${5:-ad_joint}
 if [[ ! -f "$sumstats" && -f "$input_dir/ad.sumstats.gz" ]]; then
   sumstats="$input_dir/ad.sumstats.gz"
 fi
@@ -30,4 +31,4 @@ python "$HOME/knowles_lab/software/ldsc/ldsc.py" \
   --overlap-annot \
   --print-coefficients \
   --n-blocks 200 \
-  --out "$output_dir/ad_joint"
+  --out "$output_dir/$output_name"

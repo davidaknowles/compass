@@ -32,12 +32,39 @@ esac
 
 case "$trait" in
   ad)
+    analysis_label=ad2026
     gwas="$data_root/raw/ad_gwas_2026/GCST90704647.hg19.tsv.gz"
     effects="$data_root/results/ad2026_h3k27ac_sldsc_context_effects.tsv"
     ;;
   scz)
+    analysis_label=scz2026
     gwas="$data_root/raw/scz_gwas_2026/SCZ_EUR_2026.hg19.tsv.gz"
     effects="$data_root/results/scz2026_h3k27ac_sldsc_context_effects.tsv"
+    ;;
+  pd)
+    analysis_label=pd2019
+    gwas="$data_root/raw/neuropsychiatric_gwas/pd/pd.hg19.tsv.gz"
+    effects="$data_root/results/pd2019_h3k27ac_sldsc_context_effects.tsv"
+    ;;
+  bipolar)
+    analysis_label=bipolar2025
+    gwas="$data_root/raw/neuropsychiatric_gwas/bipolar/bipolar.hg19.tsv.gz"
+    effects="$data_root/results/bipolar2025_h3k27ac_sldsc_context_effects.tsv"
+    ;;
+  mdd)
+    analysis_label=mdd2025
+    gwas="$data_root/raw/neuropsychiatric_gwas/mdd/mdd.hg19.tsv.gz"
+    effects="$data_root/results/mdd2025_h3k27ac_sldsc_context_effects.tsv"
+    ;;
+  als)
+    analysis_label=als2021
+    gwas="$data_root/raw/neuropsychiatric_gwas/als/als.hg19.tsv.gz"
+    effects="$data_root/results/als2021_h3k27ac_sldsc_context_effects.tsv"
+    ;;
+  anxiety)
+    analysis_label=anxiety2024
+    gwas="$data_root/raw/neuropsychiatric_gwas/anxiety/anxiety.hg19.tsv.gz"
+    effects="$data_root/results/anxiety2024_h3k27ac_sldsc_context_effects.tsv"
     ;;
   *)
     echo "unknown trait: $trait" >&2
@@ -45,7 +72,13 @@ case "$trait" in
     ;;
 esac
 
-run_name="compass-${trait}2026-h3k27ac-genesum-hierarchical-${constraint_label}-ldcv10-fp32-fold${fold}"
+fold_args=()
+if [[ "$fold" == all ]]; then
+  run_name="compass-${analysis_label}-h3k27ac-genesum-hierarchical-${constraint_label}-ldcv10-fp32"
+else
+  run_name="compass-${analysis_label}-h3k27ac-genesum-hierarchical-${constraint_label}-ldcv10-fp32-fold${fold}"
+  fold_args=(--cv-fold-subset "$fold")
+fi
 cd /gpfs/commons/home/daknowles/projects/compass
 source /gpfs/commons/home/daknowles/venv/torchfix/bin/activate
 export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
@@ -62,7 +95,7 @@ python scripts/run.py \
   --context-effects-tsv "$effects" \
   --context-effects-mode scaled_frozen \
   --deviation-constraint "$constraint" \
-  --cv-fold-subset "$fold" \
+  "${fold_args[@]}" \
   --device cuda \
   --model-dtype float32 \
   --lr 3e-7 \
