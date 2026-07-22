@@ -7,7 +7,7 @@
 #SBATCH --error=/gpfs/commons/home/daknowles/knowles_lab/data/compass/logs/hierarchical-genesum-fold-2026-%j.err
 #SBATCH --time=12:00:00
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=96G
+#SBATCH --mem=192G
 
 set -euo pipefail
 
@@ -101,5 +101,5 @@ python scripts/run.py \
   --lr 3e-7 \
   --lambdas 1e6,1e5,1e4,1e3,3e2,1e2,3e1,1e1 \
   --max-lambda-extensions 0 \
-  --ld-jobs 8 \
+  --ld-jobs 4 \
   --run-name "$run_name"
