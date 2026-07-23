@@ -1,5 +1,11 @@
 # LAB NOTEBOOK
 
+## 2026-07-23 consolidated manuscript results
+
+- Rewrote `docs/main.tex` to report the complete analysis set: seven current European-ancestry GWAS, historical Jansen 2019 diagnostics, public and Glass ABC annotations, brain ATAC/H3K27ac/H3K4me3 peaks, peak-to-expressed-TSS links, high-confidence predicted eQTLs, official BaselineLD S-LDSC, nuclear and rank-one COMPASS diagnostics, corrected signed hierarchical COMPASS, the matched nonnegative ablation, ABC simulations, GSEA, and Agora overlap.
+- Cross-trait tables are generated from the completed result metadata and official LDSC result files. The predicted-eQTL preparation manifest contains 12,882,024 links at probability at least 0.9 and 11,936,542 unique retained hg19 links before GWAS matching.
+- Corrected the methods text to state that production hierarchical COMPASS uses uniform regression weights, variant-specific sample sizes where supplied, float16 chromosome-level LD with `r2 >= 0.01`, signed deviations constrained through `s q + D >= 0`, and a Dykstra proximal update. The manuscript distinguishes conditional S-LDSC context profiles from independently cross-validated gene-deviation improvement.
+
 ## 2026-07-22 predicted-eQTL annotation analysis
 
 - The new annotation source uses CatBoost/GPN predicted eQTL probabilities for astrocytes, excitatory neurons, inhibitory neurons, microglia, OPCs, and oligodendrocytes. The primary threshold is `pred_prob >= 0.9`; lower-confidence predictions are excluded before coordinate conversion.

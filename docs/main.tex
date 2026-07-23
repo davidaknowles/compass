@@ -1,6 +1,7 @@
 \documentclass[11pt]{article}
-\usepackage{amsmath, amssymb, booktabs, geometry, hyperref, algorithm, algpseudocode}
+\usepackage{amsmath, amssymb, booktabs, geometry, hyperref, algorithm, algpseudocode, graphicx}
 \geometry{letterpaper, margin=1in}
+\hypersetup{hypertexnames=false}
 
 \title{COMPASS: Convex Optimization of Mediated Polygenic Architecture via SNP Scores}
 \author{}
@@ -11,7 +12,7 @@
 \maketitle
 
 \begin{abstract}
-We present a unified methodological framework for estimating gene-specific mediated heritability from genome-wide association study (GWAS) summary statistics using gene-variant annotations. While Mediated Expression Score Regression (MESC) relies on observed eQTL effect sizes, COMPASS can leverage arbitrary gene-variant annotations (e.g., deep learning predictions, Hi-C contact frequencies). We introduce a convex optimization framework that identifies modular, multi-mechanism regulatory architectures across disease genes. We derive an alternating projection algorithm combining Singular Value Thresholding (SVT) and non-negative clipping to fit the genome-wide model efficiently. 
+We present COMPASS, a framework for estimating gene- and context-specific mediated heritability from genome-wide association study (GWAS) summary statistics and sparse variant--gene annotations. COMPASS augments the infinitesimal, gene-summed stratified LD score regression (S-LDSC) model with a nuclear-norm-regularized matrix of gene-specific deviations, while retaining an explicit non-mediated residual term. Penalties are selected by ten-fold cross-validation over global LD-connected components. We applied official BaselineLD-adjusted S-LDSC and COMPASS to seven European-ancestry GWAS using public activity-by-contact links, brain chromatin peaks linked to expressed genes, and predicted eQTL probabilities. S-LDSC recovered microglial enrichment in Alzheimer disease and neuronal enrichment in schizophrenia, bipolar disorder, major depression, amyotrophic lateral sclerosis, and anxiety. Gene-specific deviations improved held-out prediction for several H3K27ac-linked analyses, most strongly for bipolar disorder, Parkinson disease, and schizophrenia, but were completely shrunk for major depression and anxiety. High-confidence predicted-eQTL annotations produced resolved microglial and oligodendrocyte-precursor coefficients in Parkinson disease; only Parkinson disease retained gene-specific deviations. These results show that context-level enrichment is more stable than gene-level decomposition and that gene-level claims require annotation-matched, LD-aware validation.
 \end{abstract}
 
 \section{Model}
@@ -29,7 +30,7 @@ Here, $w_l \ge 0$ represents the unknown heritability contribution weight of mec
 
 \subsection{The infinitesimal Gaussian assumption and its limitations}
 
-A simple assumption would be infinitesmal effects,  $\alpha_k \sim \mathcal{N}(0, \tau_\alpha)$. Given that $\beta_{jk}$ and $\alpha_k$ are independent and mean-zero, the variance of their product is the product of their variances:
+A simple assumption would be infinitesimal effects, $\alpha_k \sim \mathcal{N}(0, \tau_\alpha)$. Given that $\beta_{jk}$ and $\alpha_k$ are independent and mean-zero, the variance of their product is the product of their variances:
 \begin{equation}
     \text{Var}(\beta_{jk} \alpha_k) = \mathbb{E}[\beta_{jk}^2] \mathbb{E}[\alpha_k^2] = V_{jk} \tau_\alpha
 \end{equation}
@@ -67,15 +68,15 @@ Direct optimization of $s$ and $w$ has two pathologies:
 
 Let $B_{kl} = s_k w_l$ define the $K \times L$ matrix of mediated heritability contributions. We relax the strict rank-1 constraint $B = s w^T$ by treating $B \in \mathbb{R}^{K \times L}$ as a general matrix parameter regularized by the nuclear norm $\|B\|_* = \sum_i \sigma_i(B)$, where $\sigma_i(B)$ are the singular values of $B$.
 
-We formulate the inference as a Weighted Ordinary Least Squares (WOLS) regression minimized over the space of non-negative matrices:
+We formulate the inference as a weighted least-squares regression minimized over the space of non-negative matrices:
 \begin{equation}
     \min_{B \in \mathbb{R}_{+}^{K \times L}, \; \tau_\gamma \ge 0} \quad \sum_{j=1}^J \eta_j \left( \chi_j^2 - 1 - N \sum_{k=1}^K \sum_{l=1}^L B_{kl} \mathcal{T}_{jkl} - N \tau_\gamma l_j \right)^2 + \lambda \|B\|_*
 \end{equation}
-where $\eta_j$ are standard S-LDSC regression weights accounting for LD redundancy and heteroskedasticity.
+where $\eta_j$ are regression weights. The production hierarchical COMPASS analyses use $\eta_j=1$ to avoid response-dependent weighting during cross-validation; official S-LDSC comparisons use LDSC's native iterative weights for LD redundancy and heteroskedasticity.
 
 This relaxation yields three (potential) advantages:
 \begin{itemize}
-    \item \textbf{Convexity:} Because the WOLS loss is convex with respect to $B$ and the nuclear norm is the convex envelope of the rank function, the objective is convex, guaranteeing that any local minimum is the unique global optimum.
+    \item \textbf{Convexity:} Because the squared-error loss is convex with respect to $B$ and the nuclear norm is convex, the objective is convex. Any converged local minimum is therefore globally optimal, although correlated annotations can make the optimizer non-unique.
     \item \textbf{Discovery of Regulatory Modules:} Rather than enforcing regulatory homogeneity (where every causal gene obeys the exact same regulatory weight vector $w$), a low-rank solution $\text{rank}(B) = r > 1$ decomposes into $r$ distinct mechanistic archetypes via Singular Value Decomposition (SVD):
     \begin{equation}
         B = \sum_{i=1}^r \sigma_i u_i v_i^T
@@ -137,39 +138,35 @@ This decomposition tests whether a weakly penalized deviation matrix changes the
 While standard summary statistic methods occasionally tolerate negative enrichment parameters, enforcing $B_{kl} \ge 0$ is mandatory in this gene-centric framework. Without non-negativity constraints, the optimization landscape suffers from two failures:
 
 \paragraph{LD Collinearity Overfitting.}
-Neighboring genes on a chromosome reside within the same LD block, causing their annotation tensors to be highly collinear ($\mathcal{T}_{j, k_1, l} \approx \mathcal{T}_{j, k_2, l}$ for adjacent genes $k_1, k_2$). If an unconstrained model attempts to fit a localized GWAS signal corresponding to a true heritability contribution of $+10$, it can overfit statistical noise by assigning extreme, mutually cancelling coefficients to adjacent genes, e.g. $B_{k_1, l} = +100$ and $B_{k_2, l} = -90$ so that $B_{k_1, l} + B_{k_2, l} = +10$. This ``cancellation cheat'' preserves the macroscopic model fit while destroying gene-level resolution, creating phantom causal effects. The constraint $B_{kl} \ge 0$ acts as a regularizer against LD collinearity, forcing the model to assign heritability exclusively to the most parsimonious gene.
+Neighboring genes on a chromosome reside within the same LD block, causing their annotation tensors to be highly collinear ($\mathcal{T}_{j, k_1, l} \approx \mathcal{T}_{j, k_2, l}$ for adjacent genes $k_1, k_2$). If an unconstrained model attempts to fit a localized GWAS signal corresponding to a true heritability contribution of $+10$, it can overfit statistical noise by assigning extreme, mutually cancelling coefficients to adjacent genes, e.g. $B_{k_1, l} = +100$ and $B_{k_2, l} = -90$ so that $B_{k_1, l} + B_{k_2, l} = +10$. Such cancellation preserves the aggregate fit while making gene-level coefficients unstable. The constraint $B_{kl} \ge 0$ prevents this signed cancellation, although it cannot by itself identify one gene among collinear alternatives.
 
 \paragraph{Mathematical and Biological Plausibility}
-By definition, $B_{kl} = \alpha_k^2 w_l$ represents the variance of the causal trait effect mediated by gene $k$ via mechanism $l$. Variance cannot be negative. Further, because $\mathcal{T}_{jkl} \ge 0$, allowing negative entries in $B$ permits the model to predict $\mathbb{E}[\chi_j^2] < 1$, implying that genetic variation suppresses sampling noise—a statistical impossibility under the null hypothesis.
+By definition, $B_{kl} = \alpha_k^2 w_l$ represents a variance contribution mediated by gene $k$ via mechanism $l$ and therefore cannot be negative. Unconstrained negative entries can also offset positive LD-tagged variance and may produce fitted expectations below the null value. The hierarchical model permits negative deviations only relative to the shared context effect and retains the required constraint on the total, $s q_l+D_{kl}\ge0$.
 
 \subsection{Optimization via Alternating Projections}
 
-Because standard Singular Value Thresholding (SVT) introduces orthogonal vectors with negative values, we must solve a Non-Negative Low-Rank Matrix Approximation problem. We solve this efficiently using Proximal Gradient Descent with Dykstra's Alternating Projections.
+Because standard singular value thresholding (SVT) does not preserve elementwise lower bounds, the proximal operator for the nuclear norm plus the feasible box is evaluated by Dykstra's alternating proximal algorithm.
 
-Let $f(B, \tau_\gamma)$ denote the WOLS loss function from Equation (7). The algorithm proceeds as follows:
+Let $Z$ denote either the nuclear-model matrix $B$, with lower bound $L=0$, or the hierarchical deviation matrix $D$, with lower bound $L_{kl}=-s q_l$. Let $f(Z,\tau_\gamma)$ denote the squared-error loss. One proximal-gradient update proceeds as follows:
 
 \begin{algorithm}[H]
-\caption{Non-Negative Low-Rank Gene Heritability Regression}
+\caption{Box-constrained nuclear-norm proximal update}
 \begin{algorithmic}[1]
-\State \textbf{Input:} Pre-computed tensor $\mathcal{T} \in \mathbb{R}_{+}^{J \times K \times L}$, GWAS $\chi^2 \in \mathbb{R}^J$, LD scores $l \in \mathbb{R}^J$, step size $\zeta$, regularization $\lambda$.
-\State \textbf{Initialize:} $B^{(0)} \gets \mathbf{0}_{K \times L}$, $\tau_\gamma^{(0)} \gets 0$
-\While{not converged}
-    \State \textbf{1. Gradient Step:}
-    \State $G^{(t)} \gets B^{(t)} - \zeta \nabla_B f(B^{(t)}, \tau_\gamma^{(t)})$
-    \State $\tau_\gamma^{(t+1)} \gets \max\left(0, \; \tau_\gamma^{(t)} - \zeta \nabla_{\tau_\gamma} f(B^{(t)}, \tau_\gamma^{(t)})\right)$
-    
-    \State \textbf{2. Singular Value Thresholding (Low-Rank Projection):}
-    \State Compute reduced SVD: $U, \Sigma, V^T = \text{SVD}(G^{(t)})$
-    \State $\tilde{\Sigma} \gets \text{diag}\left(\max(0, \; \sigma_i - \zeta \lambda)\right)$
-    
-    \State \textbf{3. Non-Negative Projection:}
-    \State $B^{(t+1)} \gets \max\left(\mathbf{0}_{K \times L}, \;U \tilde{\Sigma} V^T\right)$
-\EndWhile
-\State \textbf{Output:} Modular heritability matrix $B^* = B^{(t+1)}$, background pleiotropy $\tau_\gamma^* = \tau_\gamma^{(t+1)}$.
+\State \textbf{Input:} Current $Z^{(t)}$, lower-bound matrix $L$, step size $\zeta$, penalty $\lambda$
+\State $G \gets Z^{(t)}-\zeta\nabla_Z f(Z^{(t)},\tau_\gamma^{(t)})$
+\State $X\gets G$; $P\gets0$; $Q\gets0$
+\Repeat
+    \State $Y\gets\operatorname{SVT}_{\zeta\lambda}(X+P)$; $P\gets X+P-Y$
+    \State $X_{\mathrm{new}}\gets\max(L,Y+Q)$; $Q\gets Y+Q-X_{\mathrm{new}}$
+    \State $X\gets X_{\mathrm{new}}$
+\Until{the Dykstra residual converges}
+\State $Z^{(t+1)}\gets X$
+\State Update $\tau_\gamma^{(t+1)}$ by exact non-negative coordinate minimization
+\State \textbf{Output:} feasible low-rank update $Z^{(t+1)}$ and residual coefficient $\tau_\gamma^{(t+1)}$
 \end{algorithmic}
 \end{algorithm}
 
-This algorithm converges to the global optimal modular architecture, avoiding non-convexity and LD collinearity artifacts.
+For the non-negative nuclear model, the implementation uses Dykstra iterations to evaluate the proximal operator of the nuclear norm plus the non-negative orthant. For the hierarchical model, the same procedure is applied to $D$ with the shifted box constraint $D_{kl}\ge -s q_l$, so negative deviations are allowed while total coefficients remain non-negative. The residual coefficient has an exact non-negative coordinate update, and objective-based step backoff controls sustained uphill trajectories. These operations solve a convex objective, but collinear annotations can still yield multiple equivalent decompositions; cross-validation and sensitivity analyses are therefore required for interpretation.
 
 \subsection{Cross-validation strategy}
 
@@ -229,69 +226,166 @@ Variants outside CREs also inherit their component's fold and are held out of th
 
 This design directly targets the desired generalization: the model learns $B_{kl}$ from some regulatory regions for gene $k$ and tests whether those estimates predict summary statistics in other regions for that gene, while preventing pairs with $r_{jm}^2\ge\rho_{\mathrm{CV}}$ from being split across training and validation. Unlike chromosome holdout, the size of each holdout unit is determined by the observed LD graph rather than chromosome boundaries; unlike per-gene fold labeling, its label is globally defined.
 
-\section{Application to Alzheimer Disease (AD) GWAS}
+\section{GWAS, annotations, and analysis design}
 
-Our default annotation source is the public Nasser et al. ABC prediction table: all element-gene connections with ABC score at least 0.015 across 131 biosamples.
-The ABC model predicts enhancer-gene regulation from enhancer activity and enhancer-promoter contact; the public table is distributed by the Engreitz Lab and is linked from their resource page. The ABC documentation defines the score
-as activity times contact, normalized over candidate elements within 5 Mb of the gene promoter, and notes that predictions are same-chromosome CRE-gene links.
+\subsection{GWAS panel}
 
-\begin{sloppypar}
-For Alzheimer disease (AD), the default run uses the brain-labelled biosamples available in this table: \path{astrocyte-ENCODE},
-\path{bipolar_neuron_from_iPSC-ENCODE}, and
-\path{H1_Derived_Neuronal_Progenitor_Cultured_Cells-Roadmap}. Because the public table does not contain a microglia biosample, the default also includes myeloid proxy contexts: \path{CD14-positive_monocyte-ENCODE},
-\path{CD14-positive_monocytes-Roadmap}, and
-\path{THP-1_macrophage-VanBortle2017}. The full 131-biosample table is downloaded and can be selected by passing \texttt{--abc-cell-types all}.
-\end{sloppypar}
+The current analysis panel contains seven European-ancestry GWAS (Table~\ref{tab:gwas}). Every retained summary-statistic row has a known study-provided or design-derived effective sample size. GRCh38 releases were lifted to hg19 before matching to the LD references. The 2026 Alzheimer disease (AD) analysis supersedes the historical Jansen et al. 2019 analysis; the latter is retained only for method development and simulation diagnostics.
 
-The implementation reads the ABC table in chunks, intersects each CRE interval with GWAS variants, and emits sparse variant-gene-context triples whose values are ABC scores. The regression row universe is not restricted to ABC-overlapping
-variants. Instead, COMPASS uses all GWAS variants represented in the UK Biobank LD reference panel. Variants outside ABC CREs have all-zero annotation rows but remain in the regression so they contribute to LD tagging and the residual non-ABC-mediated LD-score term. The same reference panel defines global LD components shared by all genes for cross-validation.
+\begin{table}[ht]
+\centering
+\small
+\caption{GWAS used in the current cross-trait analyses.}
+\label{tab:gwas}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lll}
+\toprule
+Trait & Release & Analysis note \\
+\midrule
+AD & 2026 consensus, GCST90704647 & European, proxy samples excluded; $N=1{,}119{,}443$ \\
+Schizophrenia (SCZ) & Bigdeli et al. 2026 & European meta-analysis; variant-specific $N_{\mathrm{eff}}$ \\
+Parkinson disease (PD) & Leonard et al. 2025 & European clinical-only; 34,933 cases, 31,009 controls \\
+Bipolar disorder (BD) & PGC4, 2025 & European, excluding 23andMe \\
+Major depression (MDD) & PGC, 2025 & European, excluding 23andMe \\
+Amyotrophic lateral sclerosis (ALS) & Project MinE, 2021 & European; GCST90027164 \\
+Anxiety & Friligkou et al. 2024 & European genomic-factor GWAS; $N=1{,}096{,}458$ \\
+\bottomrule
+\end{tabular}}
+\end{table}
 
-LD is represented as chromosome-level sparse blocks rather than a single genome-wide matrix. Raw UK Biobank correlations are converted to $r^2$, entries with $r^2<0.01$ are discarded, and the retained LD values are stored and applied as half-precision sparse tensors during fitting. Other model tensors default to
-single precision, with a command-line option to compare half-precision model tensors against the default while keeping LD half precision in both runs.
+\subsection{Annotation families}
 
-\subsection{Implementation status}
+We evaluated four annotation families. First, the public Nasser et al. activity-by-contact (ABC) resource supplied CRE--gene links with ABC score at least 0.015. Brain and myeloid contexts were analyzed with and without adipose, skeletal-muscle, and uterine negative controls. Second, Glass Lab v2 supplied matched astrocyte, microglia, neuron, and oligodendrocyte ABC predictions. We analyzed continuous scores, binary support, and distal links after excluding self-promoters. Third, binary ATAC, H3K27ac, and H3K4me3 peaks from LHX2 astrocytes, PU1 microglia, NeuN neurons, and Olig2 oligodendrocytes were used directly for S-LDSC. For COMPASS, a variant in a peak was linked to each gene expressed in that cell type whose transcription start site was within 100 kb. Fourth, predicted eQTL probabilities from CatBoost/GPN models were available for astrocytes, excitatory neurons, inhibitory neurons, microglia, oligodendrocyte precursor cells (OPCs), and oligodendrocytes. The primary predicted-eQTL analysis retained links with probability at least 0.9 and used their probabilities as annotation values.
 
-The repository now downloads the public ABC table into
-\path{raw/abc/AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt.gz} and uses ABC annotations by default in \texttt{scripts/run.py}. The row set is filtered to variants present in the UK Biobank LD metadata, and non-CRE rows are retained with zero annotations. For the default ten-fold CV, the implementation constructs chromosome-local connected components at $\rho_{\mathrm{CV}}=0.01$ directly from cached sparse LD blocks, assigns each component one global fold, and removes every row in that component from the corresponding training loss. Validation scores use only held-out annotated rows linked to genes that also have annotated training components.
+All COMPASS fits retain every GWAS variant represented in the UK Biobank LD reference, including variants with no annotation. Such variants have all-zero mediated annotations but remain in the regression and in the non-mediated residual LD-score term. UK Biobank LD is represented by chromosome-level sparse $r^2$ matrices: entries below $r^2=0.01$ are set to zero, retained values are stored in float16, and model coefficients are optimized in float32. The $r^2\ge0.01$ AD graph contained 3,354 connected components across 12.36 million variants; ten folds were balanced to within one row.
 
-\subsection{LD-component CV results}
+The equations use a common $N$ for clarity. In every real-data fit, the corresponding row is scaled by its known variant-specific $N_j$ when available; fixed effective sample sizes are used only for releases that do not report per-variant values.
 
-In the AD analysis, the $r^2\ge 0.01$ graph contained 3,354 components across 12.36 million variants. Ten folds were balanced to within one variant, and 104,411 held-out CRE rows were eligible for penalty selection. The held-out error selected the interior value $\lambda=100$ (mean squared error 2.98059), compared with 2.98074 at $\lambda\in\{300,1000\}$ and 2.98737 at $\lambda=30$. Thus, the selected penalty was not at the edge of the tested grid, although its advantage over stronger regularization was modest.
+Official S-LDSC analyses use the 1000 Genomes Phase 3 European reference, BaselineLD v2.2, HapMap3 regression SNPs, matching allele frequencies, a 1 cM LD window, overlap-annotation accounting, native iterative weights, and block-jackknife standard errors. Continuous gene-linked annotations are summed over genes before LD-score calculation. The primary context statistic is the coefficient divided by its jackknife standard error; enrichment is reported as a secondary descriptive quantity because overlapping annotations can have significant marginal enrichment despite an unresolved conditional coefficient.
 
-The selected nuclear-norm fit had a zero residual LD-score coefficient and was numerically rank one. A strict rank-one alternating refit initialized from its leading non-negative singular factors reached the same objective within numerical tolerance and had a coefficient correlation of 0.99998 with the nuclear fit. The two parameterizations therefore do not provide independent gene or context resolution in this analysis.
+For hierarchical COMPASS, negative S-LDSC coefficients are set to zero to define $q$, COMPASS re-estimates a single non-negative scale $s$, and signed gene-specific deviations $D$ are fit subject to $s q+D\ge0$. The S-LDSC profile and COMPASS deviations use the same cell labels, but the brain-peak profile is estimated from flat H3K27ac peaks whereas the COMPASS tensor links those peaks to nearby expressed genes. Thus context ordering is supplied by S-LDSC and gene-level prediction is tested by COMPASS; this is a two-stage conditional analysis, not independent replication of the context profile. The predicted-eQTL analysis uses the gene sum of the same probabilistic tensor in both stages.
 
-We performed ordered g:Profiler analysis on the top 100 global and context-specific genes from each fit, using all assayed genes as background, and cross-referenced rankings with 967 Agora nominated AD targets. The rank-one structure made context-specific rankings nearly identical. Leading enrichment terms were broad Human Protein Atlas tissue signatures rather than AD- or brain-specific programs, so they are not interpreted as disease mechanisms. At the top 1,000 global genes, 68 nuclear-fit genes and 69 rank-one-fit genes were Agora targets, versus approximately 47 expected from the assayed-gene background (unadjusted hypergeometric $p=0.00139$ and $0.000877$, respectively). The top-100 overlap was 6 targets for each fit and was not significant ($p=0.33$). These Agora comparisons are therefore exploratory evidence of broad target-list overlap, not gene-level validation.
+\section{Results}
 
-\subsection{Peripheral-control sensitivity analysis}
+\subsection{ABC analyses and model diagnostics}
 
-We repeated the complete analysis after adding three ABC contexts not expected to represent AD-relevant myeloid or neural regulation: white adipose, gastrocnemius muscle, and uterus. This expanded panel contributed 165,905 eligible held-out CRE rows. The ten-fold LD-component score again selected the interior value $\lambda=100$ (mean squared error 2.91238); the adjacent stronger penalties $\lambda\in\{300,1000\}$ scored 2.91300. The expanded nuclear solution was again numerically rank one (leading singular value $1.25\times10^{-6}$; subsequent singular values approximately $10^{-14}$), and its rank-one refit had coefficient correlation 0.99998 and relative Frobenius difference 0.0128.
+The initial Jansen 2019 AD analysis used the public ABC panel to evaluate the nuclear relaxation. Ten-fold LD-component CV selected $\lambda=100$ (mean MSE 2.98059 versus 2.98074 at $\lambda\ge300$). The fitted matrix was numerically rank one, with leading singular value $8.63\times10^{-7}$ and all subsequent values near $10^{-14}$. A strict rank-one fit initialized from the nuclear solution had coefficient correlation 0.99998 and relative Frobenius difference 0.0139. Adding adipose, muscle, and uterus controls again selected $\lambda=100$ and a rank-one solution. Controls received 8.6--10.6\% of coefficient mass, comparable to the 6.9--11.1\% assigned to brain and myeloid contexts. This failure of the intended controls demonstrates that the original nuclear model did not identify cell-type-specific ABC effects.
 
-The controls were not down-weighted: their coefficient mass was 8.60\% (adipose), 10.36\% (muscle), and 10.56\% (uterus), comparable to the brain and myeloid contexts (6.85--11.06\%). Thus, within the current ABC annotation, LD-score objective, and regularization, the fitted context factor does not distinguish these negative controls from the AD-proximal contexts. The residual non-ABC-mediated coefficient remained zero. Gene rankings and enrichment were correspondingly nearly identical across all contexts. In the expanded assayed-gene background, the top 1,000 global nuclear and rank-one rankings each contained 64 Agora targets (45.6 expected; unadjusted $p=0.00389$); top-100 overlaps were 7 ($p=0.17$) and 8 ($p=0.086$), respectively. These sensitivity results reinforce that the present fit supports only an aggregate component, rather than cell-type-specific AD prioritization.
+Agora cross-reference and pathway analyses of these historical fits were consistent with broad rather than specific prioritization. Among 18,396 assayed genes, 865 overlapped 967 Agora nominated targets. At the top 1,000 genes, the nuclear and rank-one fits contained 68 and 69 Agora targets (approximately 47 expected; unadjusted $p=0.00139$ and $0.000877$), whereas both top-100 lists contained six targets ($p=0.33$). Context rankings were nearly identical and g:Profiler terms were dominated by broad tissue signatures. These comparisons support weak aggregate overlap but not validated AD gene ranking.
+
+The historical official-LDSC diagnostic used the same 12.36 million UK Biobank variants, gene-summed ABC scores, and an all-SNP baseline. It estimated observed-scale $h^2=0.016$ (SE 0.002), intercept 1.0155 (SE 0.0062), bipolar-neuron annotated $h^2=0.0028$ (SE 0.0012; coefficient $z\simeq2.3$), and CD14 annotated $h^2=0.0015$ (SE 0.0010). Under the conventional 1000 Genomes/BaselineLD analysis, the bipolar-neuron coefficient fell to $z=0.60$ and CD14 to $z=-0.08$. The apparent matched-reference bipolar signal was therefore not robust to standard baseline adjustment and is retained only as a reference-panel diagnostic.
+
+In the 2026 GWAS, BaselineLD-adjusted public ABC coefficients were unresolved for AD (largest positive $z=1.34$ for bipolar-neuron ABC) and for SCZ. Glass continuous and distal ABC scores were also unresolved: the largest positive conditional $z$ was 1.56 for distal microglial AD links and 1.31 for continuous oligodendrocyte SCZ links. Binarization was more informative. Binary Glass microglial support had $z=3.22$ and 27.1-fold enrichment in AD, while binary Glass neuronal support had $z=3.74$ and 10.6-fold enrichment in SCZ. Self-promoters contributed 86--87\% of continuous Glass ABC mass, explaining why continuous scores were largely redundant with BaselineLD promoter features. Distal support was cell-specific (pairwise Jaccard indices approximately 0.001) but too sparse for resolved conditional coefficients.
+
+Uncalibrated nuclear COMPASS did not recover the binary S-LDSC specificity. Public-ABC fits selected $\lambda=30$ for AD and $\lambda=3$ for SCZ, but adding peripheral controls left each control with 8--11\% of coefficient mass. Continuous Glass fits assigned approximately equal mass to all four cell types (AD 21--22\%; SCZ 19--21\%). Peak-to-expressed-TSS nuclear fits were similarly diffuse. These results motivated the hierarchical decomposition and prevent interpreting the uncalibrated nuclear context weights as cell-type enrichments.
 
 \subsection{Sparse ABC simulation}
 
-To distinguish lack of statistical power from annotation identifiability, we simulated direct variant heritability from the same five ABC contexts. Bipolar-neuron and CD14-monocyte annotations received 70\% and 30\% of total $h^2=0.20$, while adipose, muscle, and uterus received zero. In each causal context, only 10\% of ABC-positive variants were causal, with direct heritability proportional to their gene-summed ABC scores. Real UK Biobank $r^2$ propagated these direct effects, and independent noncentral chi-square statistics were drawn at $N_{\mathrm{eff}}=100{,}000$ and $200{,}000$.
+We simulated $h^2=0.20$ using real ABC and LD, assigning 70\% to bipolar-neuron annotations, 30\% to CD14-monocyte annotations, and zero to adipose, muscle, and uterus. Only 10\% of ABC-positive variants in each causal context had direct effects. Three replicates were generated at $N_{\mathrm{eff}}=100{,}000$ and $200{,}000$. The nuclear model ranked both causal contexts above all controls in two of three lower-$N$ replicates and all three higher-$N$ replicates, but assigned only 46--47\% of normalized fitted mass to the two causal contexts; null controls retained 53--54\%. The mean $L_1$ error for the causal 70:30 split was approximately 0.54. In contrast, the joint infinitesimal S-LDSC baseline assigned positive coefficients to both causal annotations and near-zero or negative coefficients to controls, although its total heritability and residual term were miscalibrated under the deliberately sparse generative model. The simulation therefore identifies annotation and LD collinearity, rather than optimization alone, as a major limit on cell-type recovery.
 
-The simulation identifies an annotation-resolution limitation. At $N_{\mathrm{eff}}=100{,}000$, the nuclear model ranked the two causal contexts above all three controls in two of three replicates; at $200{,}000$, it did so in all three. However, normalized fitted mass remained diffuse at both sample sizes: bipolar and CD14 together received approximately 46--47\%, leaving 53--54\% on the null controls. The fitted 70:30 split had mean $L_1$ error approximately 0.54. This occurs despite moderate direct ABC overlap: 36--37\% of bipolar-positive variants overlap muscle or uterus annotations, and 41--42\% of CD14-positive variants do so. LD propagation and gene summation further reduce context-specific information.
+\subsection{Brain chromatin enrichments across seven GWAS}
 
-For comparison, we fit the infinitesimal Gaussian reduction in Section 1.1, treating each gene-summed ABC context as an ordinary S-LDSC annotation. The joint regression assigned positive signal to bipolar (implied annotated $h^2=0.032$--0.038) and CD14 (0.013--0.015), while joint control estimates were near zero or negative. It therefore better separates the two causal annotations in this sparse simulation, but does not recover their total $h^2$: the unrestricted residual LD-score coefficient is negative under this intentionally non-infinitesimal, sparse generative mechanism. These signed S-LDSC estimates are a useful comparative ranking baseline, not calibrated heritability estimates under annotation misspecification.
+Table~\ref{tab:h3-sldsc} summarizes the joint H3K27ac coefficients after BaselineLD adjustment. AD was microglia-predominant: PU1 H3K27ac had $z=2.97$, 13.0-fold enrichment, and enrichment $p=2.15\times10^{-7}$. SCZ and BD showed strong neuronal coefficients ($z=7.28$ and 7.74), as did MDD ($z=6.68$) and anxiety ($z=4.77$). ALS had a smaller neuronal coefficient ($z=2.49$). The clinical-only PD coefficients were individually unresolved, with neuronal $z=1.68$ and microglial $z=0.99$. MDD also had an astrocyte coefficient ($z=2.67$). The complete 12-annotation fits included ATAC and H3K4me3; notable concordant results included NeuN H3K4me3 in SCZ ($z=4.63$) and BD ($z=4.17$), whereas no ATAC coefficient added a comparably strong independent signal.
 
-We also ran the official LDSC implementation on the AD statistics, using the same 12.36 million UK Biobank reference variants, gene-summed ABC scores, and an all-SNP baseline annotation. The observed-scale total estimate was $h^2=0.016\;(\mathrm{SE}=0.002)$. The bipolar-neuron annotation accounted for $0.0028\;(\mathrm{SE}=0.0012)$ of the fitted observed-scale heritability (coefficient $1.21\times10^{-7}$; $z\approx2.3$); the CD14-monocyte estimate was $0.0015\;(\mathrm{SE}=0.0010)$, and the three peripheral controls were not individually resolved. The fitted intercept was $1.0155\;(\mathrm{SE}=0.0062)$. This run uses LDSC's native iterative weights and block-jackknife errors, but is not baseline-LD adjusted and uses the analysis $r^2\ge0.01$ reference representation; it is therefore a matched comparative analysis rather than a replacement for a conventional HapMap3/baseline-LD S-LDSC study.
+\begin{table}[ht]
+\centering
+\small
+\caption{Conditional coefficient $z$-scores for four H3K27ac annotations in joint BaselineLD-adjusted S-LDSC. A, astrocyte (LHX2); N, neuron (NeuN); M, microglia (PU1); O, oligodendrocyte (Olig2).}
+\label{tab:h3-sldsc}
+\begin{tabular}{lrrrr}
+\toprule
+GWAS & A & N & M & O \\
+\midrule
+AD 2026 & $-0.14$ & $0.61$ & $2.97$ & $0.62$ \\
+SCZ 2026 & $1.53$ & $7.28$ & $-1.03$ & $1.33$ \\
+PD 2025 & $-0.13$ & $1.68$ & $0.99$ & $0.16$ \\
+BD 2025 & $1.52$ & $7.74$ & $-0.02$ & $-0.02$ \\
+MDD 2025 & $2.67$ & $6.68$ & $0.86$ & $1.93$ \\
+ALS 2021 & $-0.43$ & $2.49$ & $0.16$ & $1.11$ \\
+Anxiety 2024 & $-0.54$ & $4.77$ & $0.49$ & $0.40$ \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-We therefore repeated the analysis with the conventional 1000 Genomes European reference, BaselineLD v2.2, HapMap3 regression weights, matching allele frequencies, and overlap-annotation accounting. Using 1,185,548 matched regression SNPs, the observed-scale estimate was $h^2=0.0152\;(\mathrm{SE}=0.0022)$ with intercept $1.0159\;(\mathrm{SE}=0.0143)$. No ABC context had a resolved conditional coefficient. The bipolar-neuron coefficient was $3.56\times10^{-8}$ (SE $5.91\times10^{-8}$; $z=0.60$), and the CD14-monocyte coefficient was $-1.01\times10^{-8}$ (SE $1.19\times10^{-7}$; $z=-0.08$); the three peripheral controls were likewise imprecise. Thus the apparent bipolar-neuron signal in the UK Biobank-reference comparison is not robust to standard BaselineLD adjustment. This adjusted result is the appropriate S-LDSC comparison; the earlier matched-reference run remains useful only as a diagnostic of the analysis-specific LD representation.
+\subsection{Hierarchical COMPASS with H3K27ac-linked genes}
 
-As an ABC-independent regulatory comparison, we jointly fit binary ATAC-seq, H3K27ac, and H3K4me3 peak annotations from human NeuN neuron, PU1 microglia, Olig2 oligodendrocyte, and LHX2 astrocyte nuclei, again conditional on BaselineLD. PU1 microglial H3K27ac peaks covered 2.72\% of SNPs, accounted for 35.4\% of fitted $h^2$ (SE 5.90\%), and had 13.0-fold enrichment (SE 2.17; enrichment $p=2.15\times10^{-7}$). Its conditional coefficient was positive ($1.58\times10^{-7}$; SE $5.30\times10^{-8}$; $z=2.97$). The binary Glass ABC analysis gave a concordant result: the microglial annotation had 27.1-fold enrichment and a positive conditional coefficient ($z=3.22$), whereas continuous Glass ABC was unresolved ($z=1.14$). The agreement between binary ABC support and independent PU1 H3K27ac peaks supports microglial enrichment in AD, but does not establish gene-level mediation.
+The corrected signed hierarchical model selected nonzero gene-specific deviations for AD, SCZ, PD, BD, and ALS (Table~\ref{tab:h3-compass}). Held-out improvement over the context-only limit ranged from 0.82\% for ALS to 5.01\% for BD. MDD and anxiety selected the context-only solution and had exactly zero deviations. The selected AD result supersedes an earlier one-sided, flat-context pilot that had selected the no-deviation limit. In the corrected annotation-matched design, AD selected $\lambda=100$, improved mean MSE by 0.89\%, and remained microglia-predominant (53.3\% of total modeled contribution). SCZ selected $\lambda=100$, improved MSE by 2.41\%, and assigned 50.2\% to neurons. PD and BD had the largest relative improvements, 4.73\% and 5.01\%, respectively. PD divided most modeled mass between neurons (52.0\%) and microglia (42.3\%); BD assigned 38.9\% to neurons and 32.3\% to the gene-shared intercept. ALS assigned 39.0\% to neurons, 26.7\% to the intercept, and 19.3\% to oligodendrocytes.
 
-An uncalibrated hierarchical COMPASS pilot did not recover this specificity. Its microglial H3K27ac coefficient was $1.60\times10^{-7}$ ($z=1.16$), while neuronal and oligodendrocyte coefficients were larger and had similar uncertainty. After fixing the context direction to the non-negative BaselineLD S-LDSC profile and re-estimating only its scale, the model assigned the largest effect to microglia ($4.45\times10^{-7}$; chromosome-jackknife $z=2.03$). In ten-fold LD-component cross-validation, the context-only limit had mean held-out MSE 15.920503. The selected value, $\lambda=10^5$, differed from that limit by less than $2\times10^{-9}$ in MSE; $\lambda=100$ increased MSE to 16.004836 and weaker penalties deteriorated further. The final gene-deviation matrix was therefore exactly zero. Of the modeled biological context contribution, 82.5\% was assigned to microglia, 10.4\% to oligodendrocytes, and 7.1\% to neurons. Thus COMPASS preserves the S-LDSC microglial ordering without shrinking the shared context effect, but finds no held-out support for AD gene-specific deviations. Because the context direction was supplied by S-LDSC, this is a conditional compatibility result rather than independent replication, and the zero deviation matrix provides no COMPASS-specific AD gene ranking for pathway analysis. This result used the earlier flat-context, one-sided-deviation implementation and is retained as a diagnostic pending a signed gene-summed refit.
+\begin{table}[ht]
+\centering
+\scriptsize
+\caption{Corrected signed hierarchical COMPASS results for H3K27ac peak-to-expressed-gene annotations. MSE$_0$ is the context-only limit. Fractions include the gene-shared intercept (I).}
+\label{tab:h3-compass}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrll}
+\toprule
+GWAS & $\lambda^*$ & MSE & MSE$_0$ & Improvement & Largest total contributions & Deviation \\
+\midrule
+AD & $100$ & 16.4093 & 16.5573 & 0.89\% & M 53.3\%, I 19.2\%, N 11.0\% & rank 2 \\
+SCZ & $100$ & 13.8820 & 14.2247 & 2.41\% & N 50.2\%, I 21.5\%, A 11.6\% & rank 2 \\
+PD & $100$ & 12.9076 & 13.5487 & 4.73\% & N 52.0\%, M 42.3\%, O 5.7\% & rank 1 \\
+BD & $100$ & 7.4173 & 7.8086 & 5.01\% & N 38.9\%, I 32.3\%, A 12.5\% & rank 2 \\
+MDD & $10^5$ & 9.3957 & 9.3957 & 0.00\% & N 61.0\%, A 19.0\%, O 13.9\% & zero \\
+ALS & $100$ & 2.8897 & 2.9137 & 0.82\% & N 39.0\%, I 26.7\%, O 19.3\% & rank 2 \\
+Anxiety & $10^6$ & 6.3371 & 6.3371 & 0.00\% & N 85.6\%, M 8.2\%, O 6.2\% & zero \\
+\bottomrule
+\end{tabular}}
+\end{table}
 
-\section{Application to Schizophrenia GWAS}
+Signed deviations were common in the nonzero fits: AD contained 31,238 positive and 29,873 negative entries; SCZ contained 30,058 positive and 29,989 negative entries. Every total coefficient satisfied $s q+D\ge0$. A matched SCZ ablation constrained $D\ge0$ and also selected $\lambda=100$ (MSE 13.9287). The signed fit had 0.34\% lower MSE, but the paired fold difference was unresolved (paired $t$-test $p=0.667$). The signed model nevertheless had lower full-data objective (9.2668 versus 9.7025) and two resolved singular values rather than one. Thus the signed formulation is biologically appropriate and fits the data better, but its predictive advantage over non-negative deviations is not established by this single comparison.
 
-The schizophrenia analysis used European-ancestry 2026 summary statistics and the same brain peak panel. BaselineLD-adjusted S-LDSC produced strong and coherent neuronal enrichment. NeuN H3K27ac peaks had 5.71-fold enrichment ($p=2.14\times10^{-23}$) and a positive conditional coefficient ($3.08\times10^{-7}$; SE $4.23\times10^{-8}$; $z=7.28$). NeuN H3K4me3 peaks had 10.2-fold enrichment and a positive coefficient ($z=4.63$). Binary Glass neuronal ABC support was also enriched 10.6-fold, with a positive coefficient ($z=3.74$); continuous and distal Glass ABC annotations were less well resolved.
+Contribution-weighted ordered g:Profiler analyses used the smallest leading gene sets accounting for 25\% and 50\% of positive deviation contribution, with all assayed genes as background. AD global and microglial rankings emphasized osteoclast differentiation, Fc receptor and B-cell signaling, lipid/cholesterol processes, and BDNF/EGFR signaling. SCZ neuronal and global rankings emphasized synapse organization, trans-synaptic signaling, neurogenesis, neuronal systems, Rett syndrome, and 16p11.2 deletion, while the microglial ranking emphasized cytokine and interferon signaling. PD rankings included MAPK, IL2, VEGF, and lysosome-related terms. BD rankings included cognition, learning or memory, and fatty-acid metabolism. ALS rankings were dominated by broad neuronal, glial, and tissue-expression terms. MDD and anxiety had no deviation-ranked genes. Because each trait produces multiple overlapping ordered queries and no external replication set was used, these g:SCS-corrected terms are exploratory descriptions of fitted rankings rather than additional association tests.
 
-Unlike AD, the uncalibrated hierarchical COMPASS H3K27ac pilot independently ranked neurons first. The neuronal coefficient was $3.65\times10^{-7}$ ($z=2.46$), corresponding to an implied annotated $h^2$ of 0.216. Astrocytes were also positive ($z=2.34$), so the result had the expected direction but weaker specificity than S-LDSC. A gene-linked peak-to-expressed-TSS pilot gave the same ordering. In the corrected hierarchy, the global context design is the gene-wise sum of the same linked annotations used for the deviations, $D$ may be signed, and only the total coefficient is constrained: $s q + D\geq0$. Ten-fold LD-component cross-validation selected $\lambda=100$, with mean held-out MSE 13.8820 versus 14.2247 in the context-only limit, a 2.41\% improvement. The weaker values $\lambda=30$ and 10 both had MSE 21.236, separating the selected value from the overfit tail. In the full-data fit, neurons accounted for 50.2\% of total modeled contribution, the gene-shared intercept for 21.5\%, astrocytes for 11.6\%, oligodendrocytes for 11.5\%, and microglia for 5.2\%. The deviation matrix contained 30,058 positive and 29,989 negative entries, while the minimum total coefficient was exactly zero. It had two resolved singular values ($3.24\times10^{-5}$ and $8.96\times10^{-6}$), with the remaining three below $1.4\times10^{-10}$, supporting a low-rank but not rank-one deviation structure.
+\subsection{High-confidence predicted-eQTL annotations}
 
-A matched ablation constrained the deviations themselves to be non-negative while retaining the gene-summed annotations, frozen context profile, folds, penalty grid, optimizer, and numerical precision. It also selected $\lambda=100$, with mean held-out MSE 13.9287. The signed model's 0.34\% lower MSE was not resolved across folds: the paired signed-minus-nonnegative difference was $-0.0468$ (SE $0.1051$; paired $t$-test $p=0.667$). The non-negative full fit was rank one and had objective 9.7025, whereas the signed rank-two fit had objective 9.2668. Thus signed deviations remove an unnecessary biological restriction and improve the full-data fit, but do not provide detectable held-out predictive improvement in this analysis.
+Predicted-eQTL links were analyzed for PD, BD, MDD, ALS, and anxiety. Source GRCh38 positions were lifted once to hg19, and failed, cross-chromosome, or multiply mapped positions were discarded. At probability at least 0.9, 12,882,024 source links passed the threshold and 11,936,542 unique lifted links were retained before GWAS matching. Table~\ref{tab:eqtl-sldsc} reports conditional S-LDSC coefficients. PD showed positive microglial ($z=2.92$) and OPC ($z=2.68$) coefficients. No coefficient reached $|z|=2$ in the other traits; the largest were excitatory-neuron BD ($z=1.75$), inhibitory-neuron MDD ($z=-1.70$), microglial ALS ($z=1.50$), and microglial anxiety ($z=1.37$). These conditional results are more conservative than the corresponding marginal enrichment statistics, which were positive for many correlated annotations.
 
-We ranked SCZ genes by positive fitted deviation contribution, $\sum_c M_{gc}D_{gc}$, where $M_{gc}$ is the annotation mass linking gene $g$ to context $c$. The leading global genes included \textit{TRIM9}, \textit{ZBTB16}, \textit{KLC1}, \textit{RASA3}, \textit{KIF21B}, \textit{TSNARE1}, \textit{FMNL2}, \textit{HLA-A}, \textit{KCNB1}, and \textit{QKI}. Because the nuclear penalty induces low rank rather than elementwise sparsity, ordered g:Profiler analysis used the smallest leading set accounting for 25\% of positive deviation contribution, with a 50\% sensitivity analysis, against all 16,283 assayed genes as background. The 25\% sets contained 326 global genes and 196--245 context-specific genes. The neuronal ranking was enriched for synapse organization, Rett syndrome, and a potassium-channel complex; the microglial ranking was enriched for cytokine, interferon, and immune-receptor signaling. At the 50\% threshold (921 global and 613--716 context-specific genes), neuronal and global enrichments strengthened for synapse organization, neuronal-system, trans-synaptic-signaling, neurogenesis, and 16p11.2 deletion terms, while microglial immune enrichment persisted. Context-specific rankings partly reflect differences in annotation mass. These within-ranking g:SCS-adjusted results are therefore exploratory pathway hypotheses rather than independent discoveries.
+\begin{table}[ht]
+\centering
+\scriptsize
+\caption{Conditional coefficient $z$-scores for continuous predicted-eQTL annotations in joint BaselineLD-adjusted S-LDSC. Exc, excitatory neuron; Inh, inhibitory neuron.}
+\label{tab:eqtl-sldsc}
+\begin{tabular}{lrrrrrr}
+\toprule
+GWAS & Astrocyte & Exc & Inh & Microglia & OPC & Oligodendrocyte \\
+\midrule
+PD & $0.49$ & $-1.41$ & $-0.15$ & $2.92$ & $2.68$ & $-0.17$ \\
+BD & $0.35$ & $1.75$ & $0.93$ & $0.20$ & $0.98$ & $-0.70$ \\
+MDD & $1.24$ & $0.87$ & $-1.70$ & $0.52$ & $1.35$ & $-0.56$ \\
+ALS & $-0.46$ & $0.06$ & $0.96$ & $1.50$ & $-0.46$ & $1.32$ \\
+Anxiety & $-0.64$ & $0.22$ & $1.29$ & $1.37$ & $-0.41$ & $-0.12$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Only PD retained gene-specific predicted-eQTL deviations (Table~\ref{tab:eqtl-compass}). It selected $\lambda=100$, lowering mean held-out MSE from 133.882 to 132.836 (0.78\%). OPCs accounted for 50.5\%, microglia 34.1\%, and astrocytes 15.4\% of modeled context contribution. The 25\% and 50\% ranked gene sets yielded 12 and 21 g:SCS-significant terms, including global synaptic-vesicle endocytosis, recycling, and pathway terms; these are exploratory because the same GWAS selected and ranked the deviations. BD, MDD, and ALS selected $\lambda=10^6$ and exactly zero deviations. Anxiety nominally selected $\lambda=30$, but its score differed from the high-penalty plateau only in the sixth decimal place and the final deviation matrix was zero. Their reported context fractions therefore reproduce the clipped S-LDSC profile after annotation-mass scaling and do not constitute COMPASS gene-level discoveries.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Hierarchical COMPASS results for predicted-eQTL probability annotations.}
+\label{tab:eqtl-compass}
+\begin{tabular}{lrrrrl}
+\toprule
+GWAS & $\lambda^*$ & MSE & MSE$_0$ & Improvement & Largest total contributions \\
+\midrule
+PD & $100$ & 132.836 & 133.882 & 0.78\% & OPC 50.5\%, M 34.1\%, A 15.4\% \\
+BD & $10^6$ & 8.3650 & 8.3650 & 0.00\% & Exc 39.4\%, Inh 28.7\%, OPC 18.1\% \\
+MDD & $10^6$ & 15.1278 & 15.1278 & 0.00\% & A 44.4\%, OPC 26.5\%, Exc 24.0\% \\
+ALS & $10^6$ & 3.8401 & 3.8401 & 0.00\% & O 41.4\%, Inh 35.0\%, M 22.1\% \\
+Anxiety & $30$ & 7.39170 & 7.39170 & $<0.01$\% & Inh 64.2\%, M 25.7\%, Exc 10.1\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussion}
+
+Across annotation families and GWAS, context-level S-LDSC signals were more stable than gene-level decompositions. Brain H3K27ac annotations recovered expected disease biology: microglia for AD and neurons for SCZ, BD, MDD, ALS, and anxiety. Predicted eQTL probabilities added a distinct PD signal in microglia and OPCs. By contrast, continuous ABC scores were usually unresolved after BaselineLD adjustment, while binary ABC support reproduced AD microglial and SCZ neuronal enrichment. This difference is consistent with promoter-dominated continuous ABC mass and indicates that annotation scaling and support can matter as much as the underlying CRE--gene map.
+
+Hierarchical COMPASS found held-out gene-specific signal for five of seven H3K27ac-linked analyses, but effect sizes were modest and only PD retained deviations under predicted-eQTL annotations. The two-stage design deliberately conditions on an S-LDSC-derived context profile estimated from the same GWAS. Consequently, the context fractions are not independent COMPASS discoveries; the independent quantity tested by CV is improvement from $D$. Nuclear regularization creates low-rank rather than elementwise-sparse solutions, so thousands of positive and negative coefficients can contribute even when only a few latent factors are resolved. Pathway results therefore depend on contribution-weighted truncation and require external replication.
+
+Several safeguards are essential. All regression variants, not only annotated variants, must be retained to model LD and the residual term. Whole-chromosome CV is invalid because genes on the held-out chromosome have no training annotations; global LD-component folds instead separate correlated variants while allowing different regulatory regions for the same gene to appear in training and validation. The $r^2=0.01$ sparsification threshold makes chromosome-level LD tractable, but correlations below that threshold are omitted. Finally, S-LDSC and COMPASS use different reference panels and weighting schemes, and the brain-peak S-LDSC profile is estimated from flat peaks before COMPASS links those peaks to genes. These differences make the combined estimator a calibrated conditional workflow rather than one joint likelihood.
+
+The current results support cell-type enrichment for several traits and gene-level predictive structure in selected annotation--GWAS combinations, but they do not support a universal gene-prioritization model. Stronger validation will require independent GWAS, independent regulatory maps, or simulations whose causal variant--gene effects are generated outside the fitted annotation family.
 
 \end{document}
