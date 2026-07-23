@@ -1,5 +1,13 @@
 # LAB NOTEBOOK
 
+## 2026-07-23 predicted-eQTL AD/SCZ extension and 0.95 sensitivity analysis
+
+- AD and SCZ were absent from the predicted-eQTL results because the original submission script explicitly enumerated only PD, bipolar disorder, MDD, ALS, and anxiety. This was an analysis-scope omission rather than a failed or negative AD/SCZ result.
+- Generalized predicted-eQTL preparation, BaselineLD S-LDSC, hierarchical COMPASS, and contribution-weighted GSEA to accept an arbitrary probability threshold and all seven traits. New model metadata records the exact annotation matrix used by GSEA; legacy metadata remains resolvable through its cache key.
+- Submitted the missing probability-at-least-0.9 AD and SCZ analyses using the completed shared annotation LD scores. Their S-LDSC root jobs are `19317835` and `19317851`; ten COMPASS CV folds, merge, full refit, and 25%/50% GSEA follow each root.
+- Submitted a probability-at-least-0.95 sensitivity analysis for AD, SCZ, PD, bipolar disorder, MDD, ALS, and anxiety. Shared preparation, annotation construction, and chromosome LD-score jobs are `19317867`, `19317868`, and `19317869`; all seven trait branches depend on this shared chain. Preparation completed across all 22 chromosomes in 10 minutes, retaining 3,353,073 thresholded source links and 3,163,365 unique lifted hg19 links. Machine-readable job tables are retained in the analysis logs.
+- The manuscript will be updated with AD/SCZ and 0.95 numerical results only after the corresponding jobs complete and their outputs pass consistency checks.
+
 ## 2026-07-23 consolidated manuscript results
 
 - Rewrote `docs/main.tex` to report the complete analysis set: seven current European-ancestry GWAS, historical Jansen 2019 diagnostics, public and Glass ABC annotations, brain ATAC/H3K27ac/H3K4me3 peaks, peak-to-expressed-TSS links, high-confidence predicted eQTLs, official BaselineLD S-LDSC, nuclear and rank-one COMPASS diagnostics, corrected signed hierarchical COMPASS, the matched nonnegative ablation, ABC simulations, GSEA, and Agora overlap.
