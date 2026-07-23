@@ -135,10 +135,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run ordered g:Profiler enrichment for COMPASS-ranked genes.")
     parser.add_argument("--b-tsv", required=True, help="COMPASS gene-by-mechanism B table")
     parser.add_argument("--out-dir", required=True)
-    parser.add_argument(
+    annotation_group = parser.add_mutually_exclusive_group()
+    annotation_group.add_argument(
         "--annotation-npz",
         default=None,
         help="Sparse annotation matrix; when supplied, rank by fitted contribution rather than coefficient",
+    )
+    annotation_group.add_argument(
+        "--run-metadata",
+        default=None,
+        help="COMPASS metadata JSON whose cache key identifies the annotation matrix",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Cache directory containing the annotation matrix named by --run-metadata",
     )
     parser.add_argument("--gtf", default=str(DEFAULT_GTF))
     parser.add_argument("--sources", default=",".join(DEFAULT_SOURCES))
@@ -165,17 +176,31 @@ def main() -> None:
         parser.error("--cumulative-score-fraction must be in (0, 1]")
     if args.all_positive and args.cumulative_score_fraction is not None:
         parser.error("--all-positive and --cumulative-score-fraction are mutually exclusive")
+    if args.run_metadata is not None and args.cache_dir is None:
+        parser.error("--cache-dir is required with --run-metadata")
 
     b_path = Path(args.b_tsv).expanduser()
     out_dir = Path(args.out_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
     sources = [source.strip() for source in args.sources.split(",") if source.strip()]
+    annotation_path = Path(args.annotation_npz).expanduser() if args.annotation_npz else None
+    if args.run_metadata is not None:
+        with open(Path(args.run_metadata).expanduser(), encoding="utf-8") as handle:
+            run_metadata = json.load(handle)
+        recorded_annotation = run_metadata.get("annotation_npz")
+        if recorded_annotation:
+            annotation_path = Path(recorded_annotation).expanduser()
+        else:
+            cache_key = run_metadata.get("cache_key")
+            if not cache_key:
+                raise ValueError(f"missing cache_key in run metadata: {args.run_metadata}")
+            annotation_path = (Path(args.cache_dir).expanduser() / cache_key).with_suffix(".A.npz")
 
     B = pd.read_csv(b_path, sep="\t", index_col=0)
     B = B.apply(pd.to_numeric, errors="coerce").fillna(0.0)
     annotation_mass = None
-    if args.annotation_npz is not None:
-        annotation = sp.load_npz(Path(args.annotation_npz).expanduser())
+    if annotation_path is not None:
+        annotation = sp.load_npz(annotation_path)
         if annotation.shape[1] != B.size:
             raise ValueError("annotation columns do not match the gene-by-context coefficient table")
         annotation_mass = np.asarray(annotation.sum(axis=0)).ravel().reshape(B.shape)
@@ -231,8 +256,9 @@ def main() -> None:
 
     metadata = {
         "b_tsv": str(b_path),
-        "annotation_npz": (
-            str(Path(args.annotation_npz).expanduser()) if args.annotation_npz is not None else None
+        "annotation_npz": str(annotation_path) if annotation_path is not None else None,
+        "run_metadata": (
+            str(Path(args.run_metadata).expanduser()) if args.run_metadata is not None else None
         ),
         "ranking_score": "deviation_contribution" if annotation_mass is not None else "coefficient",
         "gtf": str(Path(args.gtf).expanduser()),

@@ -10,10 +10,13 @@
 #SBATCH --mem=192G
 
 set -euo pipefail
-trait=${1:?usage: run_hierarchical_predicted_eqtl_fold_b6k.sbatch TRAIT FOLD}
-fold=${2:?usage: run_hierarchical_predicted_eqtl_fold_b6k.sbatch TRAIT FOLD}
+trait=${1:?usage: run_hierarchical_predicted_eqtl_fold_b6k.sbatch TRAIT FOLD [THRESHOLD]}
+fold=${2:?usage: run_hierarchical_predicted_eqtl_fold_b6k.sbatch TRAIT FOLD [THRESHOLD]}
+threshold=${3:-0.9}
 data_root=/gpfs/commons/home/daknowles/knowles_lab/data/compass
 case "$trait" in
+  ad) label=ad2026; gwas="$data_root/raw/ad_gwas_2026/GCST90704647.hg19.tsv.gz" ;;
+  scz) label=scz2026; gwas="$data_root/raw/scz_gwas_2026/SCZ_EUR_2026.hg19.tsv.gz" ;;
   pd) label=pd2025; gwas="$data_root/raw/neuropsychiatric_gwas/pd/pd.hg19.tsv.gz" ;;
   bipolar) label=bipolar2025; gwas="$data_root/raw/neuropsychiatric_gwas/bipolar/bipolar.hg19.tsv.gz" ;;
   mdd) label=mdd2025; gwas="$data_root/raw/neuropsychiatric_gwas/mdd/mdd.hg19.tsv.gz" ;;
@@ -21,8 +24,13 @@ case "$trait" in
   anxiety) label=anxiety2024; gwas="$data_root/raw/neuropsychiatric_gwas/anxiety/anxiety.hg19.tsv.gz" ;;
   *) echo "unknown trait: $trait" >&2; exit 2 ;;
 esac
-effects="$data_root/results/${label}_predicted_eqtl_sldsc_context_effects.tsv"
-base="compass-${label}-predicted-eqtl-min0.9-hierarchical-signed-ldcv10-fp32"
+if [[ "$threshold" == 0.9 ]]; then
+  result_suffix=predicted_eqtl
+else
+  result_suffix="predicted_eqtl_min${threshold}"
+fi
+effects="$data_root/results/${label}_${result_suffix}_sldsc_context_effects.tsv"
+base="compass-${label}-predicted-eqtl-min${threshold}-hierarchical-signed-ldcv10-fp32"
 fold_args=()
 if [[ "$fold" == all ]]; then
   run_name="$base"
@@ -39,7 +47,8 @@ python scripts/run.py \
   --data-root "$data_root" \
   --gwas "$gwas" \
   --annotation-source predicted_eqtl \
-  --predicted-eqtl-min-score 0.9 \
+  --predicted-eqtl-path "$data_root/raw/predicted_eqtl/links.hg19.min${threshold}" \
+  --predicted-eqtl-min-score "$threshold" \
   --method hierarchical \
   --context-annotation sum \
   --context-annotation-source gene_aggregate \

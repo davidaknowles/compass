@@ -1076,6 +1076,7 @@ def main() -> None:
         "ld_representation": "chromosome_fp16",
         "cv_component_metadata": cv_metadata,
         "cache_key": key,
+        "annotation_npz": str(paths["A"]),
         "cv": not args.no_cv,
         "cv_fold_subset": args.cv_fold_subset,
         "cv_checkpoint": (
