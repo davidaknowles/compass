@@ -61,7 +61,7 @@ for trait in ${traits[*]}; do
       --cpus-per-task=1 --job-name="pred-eqtl-${trait}-gsea${fraction}" \
       --output="$log_dir/pred-eqtl-${trait}-gsea${fraction}-%j.out" \
       --error="$log_dir/pred-eqtl-${trait}-gsea${fraction}-%j.err" \
-      --wrap "bash -lc 'cd $repo; source $HOME/venv/torchfix/bin/activate; export PYTHONPATH=\$PWD/src:\${PYTHONPATH:-}; annotation=\$(find $data_root/cache -maxdepth 1 -name \"predictedeqtl.min0.9.r2ge0.01.chromfp16.*.intercept.${trait}.hg19.tsv.gz.gwas.A.npz\" -print -quit); test -n \"\$annotation\"; python scripts/run_gsea.py --b-tsv $b_tsv --annotation-npz \"\$annotation\" --cumulative-score-fraction 0.$fraction --out-dir $data_root/results/${label}_predicted_eqtl_hierarchical_signed_gsea_c${fraction}'")")
+      --wrap "bash -lc 'cd $repo; source $HOME/venv/torchfix/bin/activate; export PYTHONPATH=\$PWD/src:\${PYTHONPATH:-}; annotation=\$(find $data_root/cache -maxdepth 1 -name \"predictedeqtl.min0.9.r2ge0.01.chromfp16.*.intercept.${trait}.hg19.tsv.gz.A.npz\" -print -quit); test -f \"\$annotation\"; python scripts/run_gsea.py --b-tsv $b_tsv --annotation-npz \"\$annotation\" --cumulative-score-fraction 0.$fraction --out-dir $data_root/results/${label}_predicted_eqtl_hierarchical_signed_gsea_c${fraction}'")")
     printf '%s\tgsea%s\t%s\n' "$trait" "$fraction" "$gsea"
   done
   printf '%s\tsldsc_fit\t%s\n%s\tsldsc_extract\t%s\n' "$trait" "$fit" "$trait" "$extract"
